@@ -127,7 +127,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     "session_started",
                     Some(&session_id),
                     SessionStarted {
-                        session_id,
+                        session_id: session_id.clone(),
                         agent_pid: started.pid,
                         title: "shell".to_string(),
                         last_output_seq: 0,
@@ -150,7 +150,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                         "stdout",
                         Some(&session_id),
                         Stdout {
-                            session_id,
+                            session_id: session_id.clone(),
                             seq: frame.seq,
                             data: frame.data,
                         },
@@ -167,7 +167,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     "session_exit",
                     Some(&session_id),
                     SessionExit {
-                        session_id,
+                        session_id: session_id.clone(),
                         exit_code: 0,
                         message: "closed".to_string(),
                     },

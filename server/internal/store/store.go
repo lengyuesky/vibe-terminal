@@ -210,6 +210,18 @@ func (db *DB) GetUserByUsername(ctx context.Context, username string) (User, err
 	return user, err
 }
 
+func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select id, username, password_hash, created_at, updated_at from users where id = ?`,
+		id)
+	var user User
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt, &user.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return user, err
+}
+
 func (db *DB) CreateAgentToken(ctx context.Context, params CreateAgentTokenParams) (AgentToken, error) {
 	token := AgentToken{
 		ID:        params.ID,
@@ -222,6 +234,25 @@ func (db *DB) CreateAgentToken(ctx context.Context, params CreateAgentTokenParam
 		`insert into agent_tokens (id, name, token_hash, expires_at, created_at) values (?, ?, ?, ?, ?)`,
 		token.ID, token.Name, token.TokenHash, token.ExpiresAt, token.CreatedAt)
 	return token, err
+}
+
+func (db *DB) ListAgentTokens(ctx context.Context) ([]AgentToken, error) {
+	rows, err := db.SQL.QueryContext(ctx,
+		`select id, name, token_hash, expires_at, used_at, revoked_at, created_at
+		 from agent_tokens order by created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tokens []AgentToken
+	for rows.Next() {
+		var token AgentToken
+		if err := rows.Scan(&token.ID, &token.Name, &token.TokenHash, &token.ExpiresAt, &token.UsedAt, &token.RevokedAt, &token.CreatedAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, rows.Err()
 }
 
 func (db *DB) UseAgentTokenByHash(ctx context.Context, tokenHash string, usedAt time.Time) (AgentToken, error) {

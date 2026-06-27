@@ -20,6 +20,39 @@ pub struct StartSession {
     pub rows: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionStarted {
+    pub session_id: String,
+    pub agent_pid: u32,
+    pub title: String,
+    pub last_output_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Stdin {
+    pub session_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Stdout {
+    pub session_id: String,
+    pub seq: i64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CloseSession {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionExit {
+    pub session_id: String,
+    pub exit_code: i32,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,13 @@
+[Unit]
+Description=vibe-terminal agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/vibe-agent run
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

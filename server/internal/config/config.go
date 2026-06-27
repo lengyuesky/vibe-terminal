@@ -9,6 +9,7 @@ type Config struct {
 	Addr            string
 	DatabasePath    string
 	OutputRoot      string
+	WebDir          string
 	SessionSecret   []byte
 	AdminUsername   string
 	AdminPassword   string
@@ -19,11 +20,13 @@ func FromEnv() Config {
 	addr := getenv("VIBE_ADDR", ":8080")
 	dbPath := getenv("VIBE_DB", "data/vibe-terminal.db")
 	outputRoot := getenv("VIBE_OUTPUT_ROOT", "workspace-data")
+	webDir := getenv("VIBE_WEB_DIR", "web/dist")
 	secret := []byte(getenv("VIBE_SESSION_SECRET", "dev-session-secret-32-bytes-long"))
 	return Config{
 		Addr:            addr,
 		DatabasePath:    dbPath,
 		OutputRoot:      outputRoot,
+		WebDir:          webDir,
 		SessionSecret:   secret,
 		AdminUsername:   os.Getenv("VIBE_ADMIN_USER"),
 		AdminPassword:   os.Getenv("VIBE_ADMIN_PASSWORD"),

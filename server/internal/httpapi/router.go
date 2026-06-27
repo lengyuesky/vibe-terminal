@@ -31,6 +31,7 @@ type Deps struct {
 	Audit    audit.Writer
 	Hub      *wshub.Hub
 	Output   terminal.OutputWriter
+	StaticFiles http.FileSystem
 }
 
 type router struct {
@@ -40,6 +41,7 @@ type router struct {
 	audit    audit.Writer
 	hub      *wshub.Hub
 	output   terminal.OutputWriter
+	static   http.FileSystem
 	mux      *http.ServeMux
 }
 
@@ -60,6 +62,7 @@ func NewRouter(deps Deps) http.Handler {
 		audit:    deps.Audit,
 		hub:      deps.Hub,
 		output:   deps.Output,
+		static:   deps.StaticFiles,
 		mux:      http.NewServeMux(),
 	}
 	r.routes()
@@ -82,6 +85,9 @@ func (r *router) routes() {
 	r.mux.HandleFunc("/api/sessions/", r.handleSessionRoutes)
 	r.mux.HandleFunc("GET /ws/agent", r.handleAgentWebSocket)
 	r.mux.HandleFunc("GET /ws/web", r.handleWebWebSocket)
+	if r.static != nil {
+		r.mux.Handle("/", http.FileServer(r.static))
+	}
 }
 
 func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {

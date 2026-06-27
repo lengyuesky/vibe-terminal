@@ -38,6 +38,7 @@ func main() {
 		Store:    db,
 		Sessions: auth.NewSessionManager(cfg.SessionSecret, cfg.SessionDuration),
 		Output:   terminal.FileOutputWriter{Root: cfg.OutputRoot},
+		StaticFiles: http.Dir(cfg.WebDir),
 	})
 	log.Printf("vibe-terminal server listening on %s", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, router); err != nil {

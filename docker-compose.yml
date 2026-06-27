@@ -1,0 +1,23 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      VIBE_ADDR: ":8080"
+      VIBE_DB: "/data/vibe-terminal.db"
+      VIBE_OUTPUT_ROOT: "/workspace-data"
+      VIBE_SESSION_SECRET: "${VIBE_SESSION_SECRET}"
+      VIBE_ADMIN_USER: "${VIBE_ADMIN_USER}"
+      VIBE_ADMIN_PASSWORD: "${VIBE_ADMIN_PASSWORD}"
+    volumes:
+      - vibe-data:/data
+      - vibe-workspace-data:/workspace-data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  vibe-data:
+  vibe-workspace-data:

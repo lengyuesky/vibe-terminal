@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+dist/
+coverage/
+target/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+server/server
+agent/vibe-agent
+tmp/
+data/
+workspace-data/

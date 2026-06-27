@@ -5,7 +5,17 @@ export type Session = {
   device_id?: string;
   title: string;
   status: string;
+  shell_path?: string;
+  working_directory?: string;
+  agent_pid?: number;
   last_output_seq?: number;
+};
+export type SessionOutputChunk = {
+  id: string;
+  session_id: string;
+  start_seq: number;
+  end_seq: number;
+  data: string;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -38,9 +48,30 @@ export function listDevices(): Promise<Device[]> {
   return request<Device[]>('/api/devices');
 }
 
+export function listSessions(deviceId: string): Promise<Session[]> {
+  return request<Session[]>(`/api/devices/${deviceId}/sessions`);
+}
+
+export function listSessionOutput(sessionId: string): Promise<SessionOutputChunk[]> {
+  return request<SessionOutputChunk[]>(`/api/sessions/${sessionId}/output`);
+}
+
 export function createSession(deviceId: string): Promise<Session> {
   return request<Session>(`/api/devices/${deviceId}/sessions`, {
     method: 'POST',
     body: JSON.stringify({ shell_path: '/bin/bash', working_directory: '$HOME', cols: 120, rows: 32 }),
+  });
+}
+
+export function closeSession(sessionId: string): Promise<void> {
+  return request<void>(`/api/sessions/${sessionId}/close`, {
+    method: 'POST',
+  });
+}
+
+export function renameSession(sessionId: string, title: string): Promise<Session> {
+  return request<Session>(`/api/sessions/${sessionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
   });
 }

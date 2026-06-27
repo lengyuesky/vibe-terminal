@@ -395,11 +395,28 @@ func (db *DB) UpdateTerminalSessionStatus(ctx context.Context, id string, status
 	return nil
 }
 
+func (db *DB) UpdateTerminalSessionTitle(ctx context.Context, id string, title string) error {
+	result, err := db.SQL.ExecContext(ctx,
+		`update terminal_sessions set title = ?, updated_at = ? where id = ?`,
+		title, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) ListTerminalSessionsForDevice(ctx context.Context, deviceID string) ([]TerminalSession, error) {
 	rows, err := db.SQL.QueryContext(ctx,
 		`select id, device_id, title, shell_path, working_directory, status, agent_pid, last_output_seq, created_at, updated_at
-		 from terminal_sessions where device_id = ? order by created_at`,
-		deviceID)
+		 from terminal_sessions where device_id = ? and status != ? order by created_at`,
+		deviceID, SessionClosed)
 	if err != nil {
 		return nil, err
 	}

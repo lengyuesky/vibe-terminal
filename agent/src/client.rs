@@ -2,8 +2,12 @@ use anyhow::{Context, Result};
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::time::Duration;
+use tokio::time;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use crate::buffer::OutputBuffer;
 use crate::config::AgentConfig;
 use crate::protocol::{
     CloseSession, Envelope, SessionExit, SessionStarted, StartSession, Stdin, Stdout,
@@ -92,92 +96,137 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
         .context("send agent hello")?;
 
     let mut pty = PtyManager::new();
-    let mut buffers = std::collections::BTreeMap::new();
+    let mut buffers: BTreeMap<String, OutputBuffer> = BTreeMap::new();
+    let mut output_tick = time::interval(Duration::from_millis(30));
 
-    while let Some(message) = read.next().await {
-        let message = message.context("read websocket message")?;
-        if !message.is_text() {
-            continue;
-        }
-        let text = message.into_text().context("read text message")?;
-        let envelope: Envelope<Value> = serde_json::from_str(&text).context("decode envelope")?;
-        match envelope.message_type.as_str() {
-            "start_session" => {
-                let payload: StartSession = serde_json::from_value(envelope.payload)?;
-                let session_id = payload.session_id.clone();
-                let started = pty.start(StartRequest {
-                    session_id: session_id.clone(),
-                    shell_path: payload.shell_path.clone(),
-                    working_directory: payload.working_directory.clone(),
-                    cols: payload.cols,
-                    rows: payload.rows,
-                })?;
-                registry.upsert(SessionRecord {
-                    session_id: session_id.clone(),
-                    title: "shell".to_string(),
-                    shell_path: payload.shell_path,
-                    working_directory: payload.working_directory,
-                    status: "running".to_string(),
-                    agent_pid: started.pid,
-                    last_output_seq: 0,
-                });
-                buffers.insert(session_id.clone(), crate::buffer::OutputBuffer::new(1024));
-                send_payload(
-                    &mut write,
-                    "session_started",
-                    Some(&session_id),
-                    SessionStarted {
-                        session_id: session_id.clone(),
-                        agent_pid: started.pid,
-                        title: "shell".to_string(),
-                        last_output_seq: 0,
-                    },
-                )
-                .await?;
+    loop {
+        tokio::select! {
+            message = read.next() => {
+                let Some(message) = message else {
+                    return Ok(());
+                };
+                let message = message.context("read websocket message")?;
+                if !message.is_text() {
+                    continue;
+                }
+                let text = message.into_text().context("read text message")?;
+                let envelope: Envelope<Value> = serde_json::from_str(&text).context("decode envelope")?;
+                match envelope.message_type.as_str() {
+                    "start_session" => {
+                        let payload: StartSession = serde_json::from_value(envelope.payload)?;
+                        let session_id = payload.session_id.clone();
+                        let started = pty.start(StartRequest {
+                            session_id: session_id.clone(),
+                            shell_path: payload.shell_path.clone(),
+                            working_directory: payload.working_directory.clone(),
+                            cols: payload.cols,
+                            rows: payload.rows,
+                        })?;
+                        registry.upsert(SessionRecord {
+                            session_id: session_id.clone(),
+                            title: "shell".to_string(),
+                            shell_path: payload.shell_path,
+                            working_directory: payload.working_directory,
+                            status: "running".to_string(),
+                            agent_pid: started.pid,
+                            last_output_seq: 0,
+                        });
+                        buffers.insert(session_id.clone(), OutputBuffer::new(1024));
+                        send_payload(
+                            &mut write,
+                            "session_started",
+                            Some(&session_id),
+                            SessionStarted {
+                                session_id: session_id.clone(),
+                                agent_pid: started.pid,
+                                title: "shell".to_string(),
+                                last_output_seq: 0,
+                            },
+                        )
+                        .await?;
+                    }
+                    "stdin" => {
+                        let payload: Stdin = serde_json::from_value(envelope.payload)?;
+                        write_stdin_if_session_exists(&mut pty, &buffers, &payload)?;
+                    }
+                    "close_session" => {
+                        let payload: CloseSession = serde_json::from_value(envelope.payload)?;
+                        let session_id = payload.session_id.clone();
+                        pty.close(&session_id)?;
+                        buffers.remove(&session_id);
+                        send_payload(
+                            &mut write,
+                            "session_exit",
+                            Some(&session_id),
+                            SessionExit {
+                                session_id: session_id.clone(),
+                                exit_code: 0,
+                                message: "closed".to_string(),
+                            },
+                        )
+                        .await?;
+                    }
+                    _ => {}
+                }
             }
-            "stdin" => {
-                let payload: Stdin = serde_json::from_value(envelope.payload)?;
-                let session_id = payload.session_id.clone();
-                pty.write(&session_id, &payload.data)?;
-                let output = pty.read_available(&session_id)?;
-                if !output.is_empty() {
-                    let buffer = buffers
-                        .entry(session_id.clone())
-                        .or_insert_with(|| crate::buffer::OutputBuffer::new(1024));
-                    let frame = buffer.push(output);
+            _ = output_tick.tick() => {
+                for frame in flush_pty_outputs(&mut pty, &mut buffers)? {
                     send_payload(
                         &mut write,
                         "stdout",
-                        Some(&session_id),
+                        Some(&frame.session_id),
                         Stdout {
-                            session_id: session_id.clone(),
+                            session_id: frame.session_id.clone(),
                             seq: frame.seq,
-                            data: frame.data,
+                            data: frame.data.clone(),
                         },
                     )
                     .await?;
                 }
             }
-            "close_session" => {
-                let payload: CloseSession = serde_json::from_value(envelope.payload)?;
-                let session_id = payload.session_id.clone();
-                pty.close(&session_id)?;
-                send_payload(
-                    &mut write,
-                    "session_exit",
-                    Some(&session_id),
-                    SessionExit {
-                        session_id: session_id.clone(),
-                        exit_code: 0,
-                        message: "closed".to_string(),
-                    },
-                )
-                .await?;
-            }
-            _ => {}
         }
     }
-    Ok(())
+}
+
+fn write_stdin_if_session_exists(
+    pty: &mut PtyManager,
+    buffers: &BTreeMap<String, OutputBuffer>,
+    payload: &Stdin,
+) -> Result<()> {
+    if !buffers.contains_key(&payload.session_id) {
+        return Ok(());
+    }
+    pty.write(&payload.session_id, &payload.data)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SessionOutputFrame {
+    session_id: String,
+    seq: i64,
+    data: String,
+}
+
+fn flush_pty_outputs(
+    pty: &mut PtyManager,
+    buffers: &mut BTreeMap<String, OutputBuffer>,
+) -> Result<Vec<SessionOutputFrame>> {
+    let mut frames = Vec::new();
+    for session_id in buffers.keys().cloned().collect::<Vec<_>>() {
+        let output = pty.read_available(&session_id)?;
+        if output.is_empty() {
+            continue;
+        }
+        let frame = buffers
+            .entry(session_id.clone())
+            .or_insert_with(|| OutputBuffer::new(1024))
+            .push(output);
+        frames.push(SessionOutputFrame {
+            session_id,
+            seq: frame.seq,
+            data: frame.data,
+        });
+    }
+    Ok(frames)
 }
 
 fn device_fingerprint(device_name: &str) -> String {
@@ -215,10 +264,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use crate::buffer::OutputBuffer;
 
     #[test]
     fn agent_ws_url_uses_websocket_scheme() {
         assert_eq!(agent_ws_url("https://terminal.example.com"), "wss://terminal.example.com/ws/agent");
         assert_eq!(agent_ws_url("http://localhost:8080/"), "ws://localhost:8080/ws/agent");
+    }
+
+    #[test]
+    fn flush_pty_outputs_collects_echo_without_another_input() {
+        let mut pty = PtyManager::new();
+        let session = pty
+            .start(StartRequest {
+                session_id: "sess-echo".into(),
+                shell_path: "/bin/cat".into(),
+                working_directory: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+            })
+            .expect("start pty");
+        let mut buffers = BTreeMap::new();
+        buffers.insert(session.session_id.clone(), OutputBuffer::new(16));
+
+        pty.write(&session.session_id, "p").expect("write");
+        std::thread::sleep(Duration::from_millis(100));
+
+        let frames = flush_pty_outputs(&mut pty, &mut buffers).expect("flush");
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.session_id == session.session_id && frame.data.contains('p')),
+            "frames were {frames:?}"
+        );
+    }
+
+    #[test]
+    fn stdin_for_unknown_session_does_not_disconnect_agent() {
+        let mut pty = PtyManager::new();
+        let buffers = BTreeMap::new();
+        let payload = Stdin {
+            session_id: "missing".into(),
+            data: "pwd\n".into(),
+        };
+
+        write_stdin_if_session_exists(&mut pty, &buffers, &payload).expect("unknown stdin should be ignored");
     }
 }

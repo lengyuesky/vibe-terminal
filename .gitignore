@@ -9,8 +9,10 @@ target/
 .env
 .env.*
 !.env.example
+.claude/
 server/server
 agent/vibe-agent
 tmp/
 data/
 workspace-data/
+.tools/

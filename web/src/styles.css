@@ -117,7 +117,7 @@ input {
 .terminalArea {
   min-width: 0;
   display: grid;
-  grid-template-rows: 42px minmax(0, 1fr);
+  grid-template-rows: 52px minmax(0, 1fr);
 }
 
 .tabs {
@@ -129,8 +129,163 @@ input {
   overflow-x: auto;
 }
 
-.tabs button[aria-selected="true"] {
+.tabItem {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 180px;
+  max-width: min(360px, calc(100vw - 24px));
+}
+
+.tabButton {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  gap: 1px;
+  min-width: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  text-align: left;
+}
+
+.tabTitle,
+.tabMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabMeta {
+  display: inline-flex;
+  min-width: 0;
+  gap: 5px;
+  align-items: center;
+  color: #a8b0bd;
+  font-size: 11px;
+}
+
+.tabDirectory {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabSeparator,
+.tabSessionId {
+  flex: 0 0 auto;
+  color: #7d8794;
+}
+
+.statusBadge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  border-radius: 999px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  line-height: 1;
+}
+
+.statusRunning {
+  border-color: #2f9d64;
+  background: rgba(47, 157, 100, 0.14);
+  color: #67d391;
+}
+
+.statusStarting {
+  border-color: #3d78bd;
+  background: rgba(61, 120, 189, 0.16);
+  color: #74b4ff;
+}
+
+.statusLost {
+  border-color: #c95b44;
+  background: rgba(201, 91, 68, 0.17);
+  color: #ff9b73;
+}
+
+.statusExited {
+  border-color: #697484;
+  background: rgba(105, 116, 132, 0.18);
+  color: #b7beca;
+}
+
+.statusClosed,
+.statusUnknown {
+  border-color: #525b67;
+  background: rgba(82, 91, 103, 0.16);
+  color: #a8b0bd;
+}
+
+.tabs .tabButton[aria-selected="true"] {
   background: #37516f;
+}
+
+.tabActions {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.tabs .iconButton {
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  width: 34px;
+  padding: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+
+.tabs .iconButton:last-child {
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+.tabs .iconButton:hover:not(:disabled),
+.tabs .tabButton:hover:not(:disabled) {
+  background: #30425a;
+}
+
+.tabs .danger:hover:not(:disabled) {
+  background: #633238;
+}
+
+.tabs button:disabled,
+.tabs input:disabled {
+  opacity: 0.55;
+}
+
+.renameForm {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.renameForm label {
+  display: block;
+  width: 180px;
+}
+
+.renameForm label span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.renameForm input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid #46515f;
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  background: #0f1115;
+  color: #f4f5f7;
+  padding: 0 10px;
 }
 
 .terminalPane {

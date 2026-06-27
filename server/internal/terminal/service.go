@@ -37,6 +37,11 @@ type OutputWriter interface {
 	WriteChunk(sessionID string, startSeq int64, endSeq int64, data []byte) (path string, bytesWritten int64, err error)
 }
 
+type OutputStore interface {
+	OutputWriter
+	ReadChunk(storagePath string) ([]byte, error)
+}
+
 type FileOutputWriter struct {
 	Root string
 }
@@ -54,6 +59,14 @@ func (w FileOutputWriter) WriteChunk(sessionID string, startSeq int64, endSeq in
 		return "", 0, err
 	}
 	return filepath.ToSlash(relativePath), int64(len(data)), nil
+}
+
+func (w FileOutputWriter) ReadChunk(storagePath string) ([]byte, error) {
+	cleanPath := filepath.Clean(storagePath)
+	if filepath.IsAbs(cleanPath) || cleanPath == "." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || cleanPath == ".." {
+		return nil, fmt.Errorf("invalid storage path")
+	}
+	return os.ReadFile(filepath.Join(w.Root, cleanPath))
 }
 
 func safeName(value string) string {

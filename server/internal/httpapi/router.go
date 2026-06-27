@@ -25,12 +25,12 @@ import (
 )
 
 type Deps struct {
-	Store    *store.DB
-	Sessions *auth.SessionManager
-	Presence *devices.Presence
-	Audit    audit.Writer
-	Hub      *wshub.Hub
-	Output   terminal.OutputWriter
+	Store       *store.DB
+	Sessions    *auth.SessionManager
+	Presence    *devices.Presence
+	Audit       audit.Writer
+	Hub         *wshub.Hub
+	Output      terminal.OutputStore
 	StaticFiles http.FileSystem
 }
 
@@ -40,7 +40,7 @@ type router struct {
 	presence *devices.Presence
 	audit    audit.Writer
 	hub      *wshub.Hub
-	output   terminal.OutputWriter
+	output   terminal.OutputStore
 	static   http.FileSystem
 	mux      *http.ServeMux
 }
@@ -380,12 +380,14 @@ func (r *router) handleListSessions(w http.ResponseWriter, req *http.Request, de
 
 func (r *router) handleSessionRoutes(w http.ResponseWriter, req *http.Request) {
 	rest := strings.TrimPrefix(req.URL.Path, "/api/sessions/")
-	sessionID, suffix, ok := strings.Cut(rest, "/")
-	if !ok {
+	sessionID, suffix, _ := strings.Cut(rest, "/")
+	if sessionID == "" {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
 	switch {
+	case req.Method == http.MethodPatch && suffix == "":
+		r.handleRenameSession(w, req, sessionID)
 	case req.Method == http.MethodPost && suffix == "close":
 		r.handleCloseSession(w, req, sessionID)
 	case req.Method == http.MethodGet && suffix == "output":
@@ -393,6 +395,33 @@ func (r *router) handleSessionRoutes(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (r *router) handleRenameSession(w http.ResponseWriter, req *http.Request, sessionID string) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	var body struct {
+		Title string `json:"title"`
+	}
+	if !readJSON(w, req, &body) {
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		writeError(w, http.StatusBadRequest, "invalid_title", "title is required")
+		return
+	}
+	if err := r.store.UpdateTerminalSessionTitle(req.Context(), sessionID, title); err != nil {
+		writeStoreError(w, err, "session")
+		return
+	}
+	session, err := r.store.GetTerminalSession(req.Context(), sessionID)
+	if err != nil {
+		writeStoreError(w, err, "session")
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionResponse(session))
 }
 
 func (r *router) handleCloseSession(w http.ResponseWriter, req *http.Request, sessionID string) {
@@ -577,11 +606,15 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 		}
 		agentPID := 0
 		lastSeq := int64(0)
+		status := store.SessionExited
 		if session, err := r.store.GetTerminalSession(ctx, msg.SessionID); err == nil {
 			agentPID = session.AgentPID
 			lastSeq = session.LastOutputSeq
+			if session.Status == store.SessionClosed {
+				status = store.SessionClosed
+			}
 		}
-		_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, store.SessionExited, agentPID, lastSeq)
+		_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, status, agentPID, lastSeq)
 		_ = r.hub.FromAgent(deviceID, msg)
 	case protocol.TypeError:
 		_ = r.audit.Log(ctx, store.AuditEvent{
@@ -623,7 +656,9 @@ func (r *router) agentOwnsSession(ctx context.Context, deviceID string, sessionI
 }
 
 func (r *router) syncAgentSessions(ctx context.Context, deviceID string, sessions []protocol.SessionSummary) {
+	seen := map[string]struct{}{}
 	for _, summary := range sessions {
+		seen[summary.SessionID] = struct{}{}
 		existing, err := r.store.GetTerminalSession(ctx, summary.SessionID)
 		if errors.Is(err, store.ErrNotFound) {
 			_, _ = r.store.CreateTerminalSession(ctx, store.TerminalSession{
@@ -642,8 +677,24 @@ func (r *router) syncAgentSessions(ctx context.Context, deviceID string, session
 		if err != nil || existing.DeviceID != deviceID {
 			continue
 		}
+		if existing.Status == store.SessionClosed {
+			continue
+		}
 		r.hub.BindSession(summary.SessionID, deviceID)
 		_ = r.store.UpdateTerminalSessionStatus(ctx, summary.SessionID, valueOr(summary.Status, store.SessionRunning), summary.AgentPID, summary.LastOutputSeq)
+	}
+	existingSessions, err := r.store.ListTerminalSessionsForDevice(ctx, deviceID)
+	if err != nil {
+		return
+	}
+	for _, session := range existingSessions {
+		if _, ok := seen[session.ID]; ok {
+			continue
+		}
+		if session.Status != store.SessionRunning && session.Status != store.SessionStarting {
+			continue
+		}
+		_ = r.store.UpdateTerminalSessionStatus(ctx, session.ID, store.SessionLost, session.AgentPID, session.LastOutputSeq)
 	}
 }
 
@@ -658,6 +709,15 @@ func (r *router) handleSessionOutput(w http.ResponseWriter, req *http.Request, s
 	}
 	out := make([]map[string]any, 0, len(chunks))
 	for _, chunk := range chunks {
+		data := ""
+		if r.output != nil {
+			raw, err := r.output.ReadChunk(chunk.StoragePath)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "output_error", "failed to read output")
+				return
+			}
+			data = string(raw)
+		}
 		out = append(out, map[string]any{
 			"id":           chunk.ID,
 			"session_id":   chunk.SessionID,
@@ -665,6 +725,7 @@ func (r *router) handleSessionOutput(w http.ResponseWriter, req *http.Request, s
 			"end_seq":      chunk.EndSeq,
 			"storage_path": chunk.StoragePath,
 			"byte_size":    chunk.ByteSize,
+			"data":         data,
 			"created_at":   chunk.CreatedAt.Format(time.RFC3339),
 		})
 	}

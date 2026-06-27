@@ -14,6 +14,7 @@ import (
 	"github.com/djy/vibe-terminal/server/internal/config"
 	"github.com/djy/vibe-terminal/server/internal/httpapi"
 	"github.com/djy/vibe-terminal/server/internal/store"
+	"github.com/djy/vibe-terminal/server/internal/terminal"
 )
 
 func main() {
@@ -36,6 +37,7 @@ func main() {
 	router := httpapi.NewRouter(httpapi.Deps{
 		Store:    db,
 		Sessions: auth.NewSessionManager(cfg.SessionSecret, cfg.SessionDuration),
+		Output:   terminal.FileOutputWriter{Root: cfg.OutputRoot},
 	})
 	log.Printf("vibe-terminal server listening on %s", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, router); err != nil {

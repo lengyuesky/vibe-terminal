@@ -30,6 +30,7 @@ type Deps struct {
 	Presence *devices.Presence
 	Audit    audit.Writer
 	Hub      *wshub.Hub
+	Output   terminal.OutputWriter
 }
 
 type router struct {
@@ -38,6 +39,7 @@ type router struct {
 	presence *devices.Presence
 	audit    audit.Writer
 	hub      *wshub.Hub
+	output   terminal.OutputWriter
 	mux      *http.ServeMux
 }
 
@@ -57,6 +59,7 @@ func NewRouter(deps Deps) http.Handler {
 		presence: deps.Presence,
 		audit:    deps.Audit,
 		hub:      deps.Hub,
+		output:   deps.Output,
 		mux:      http.NewServeMux(),
 	}
 	r.routes()
@@ -554,6 +557,7 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 		if session, err := r.store.GetTerminalSession(ctx, msg.SessionID); err == nil {
 			_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, session.Status, session.AgentPID, msg.Seq)
 		}
+		r.persistOutputChunk(ctx, msg)
 		_ = r.hub.FromAgent(deviceID, msg)
 	case protocol.TypeSessionExit:
 		msg, err := decodePayload[protocol.SessionExit](env)
@@ -584,6 +588,29 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 	}
 }
 
+func (r *router) persistOutputChunk(ctx context.Context, msg protocol.Stdout) {
+	if r.output == nil {
+		return
+	}
+	path, size, err := r.output.WriteChunk(msg.SessionID, msg.Seq, msg.Seq, []byte(msg.Data))
+	if err != nil {
+		_ = r.audit.Log(ctx, store.AuditEvent{
+			SessionID: msg.SessionID,
+			EventType: "output_write_failed",
+			Summary:   "terminal output chunk failed to write",
+		})
+		return
+	}
+	_, _ = r.store.CreateOutputChunk(ctx, store.OutputChunk{
+		ID:          uuid.NewString(),
+		SessionID:   msg.SessionID,
+		StartSeq:    msg.Seq,
+		EndSeq:      msg.Seq,
+		StoragePath: path,
+		ByteSize:    size,
+	})
+}
+
 func (r *router) agentOwnsSession(ctx context.Context, deviceID string, sessionID string) bool {
 	session, err := r.store.GetTerminalSession(ctx, sessionID)
 	return err == nil && session.DeviceID == deviceID
@@ -591,8 +618,8 @@ func (r *router) agentOwnsSession(ctx context.Context, deviceID string, sessionI
 
 func (r *router) syncAgentSessions(ctx context.Context, deviceID string, sessions []protocol.SessionSummary) {
 	for _, summary := range sessions {
-		r.hub.BindSession(summary.SessionID, deviceID)
-		if _, err := r.store.GetTerminalSession(ctx, summary.SessionID); errors.Is(err, store.ErrNotFound) {
+		existing, err := r.store.GetTerminalSession(ctx, summary.SessionID)
+		if errors.Is(err, store.ErrNotFound) {
 			_, _ = r.store.CreateTerminalSession(ctx, store.TerminalSession{
 				ID:               summary.SessionID,
 				DeviceID:         deviceID,
@@ -603,8 +630,13 @@ func (r *router) syncAgentSessions(ctx context.Context, deviceID string, session
 				AgentPID:         summary.AgentPID,
 				LastOutputSeq:    summary.LastOutputSeq,
 			})
+			r.hub.BindSession(summary.SessionID, deviceID)
 			continue
 		}
+		if err != nil || existing.DeviceID != deviceID {
+			continue
+		}
+		r.hub.BindSession(summary.SessionID, deviceID)
 		_ = r.store.UpdateTerminalSessionStatus(ctx, summary.SessionID, valueOr(summary.Status, store.SessionRunning), summary.AgentPID, summary.LastOutputSeq)
 	}
 }

@@ -366,6 +366,18 @@ func (db *DB) CreateTerminalSession(ctx context.Context, session TerminalSession
 	return session, err
 }
 
+func (db *DB) GetTerminalSession(ctx context.Context, id string) (TerminalSession, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select id, device_id, title, shell_path, working_directory, status, agent_pid, last_output_seq, created_at, updated_at
+		 from terminal_sessions where id = ?`,
+		id)
+	session, err := scanTerminalSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TerminalSession{}, ErrNotFound
+	}
+	return session, err
+}
+
 func (db *DB) UpdateTerminalSessionStatus(ctx context.Context, id string, status string, agentPID int, lastSeq int64) error {
 	result, err := db.SQL.ExecContext(ctx,
 		`update terminal_sessions set status = ?, agent_pid = ?, last_output_seq = ?, updated_at = ? where id = ?`,

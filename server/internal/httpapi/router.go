@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,15 +9,19 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/djy/vibe-terminal/server/internal/audit"
 	"github.com/djy/vibe-terminal/server/internal/auth"
 	"github.com/djy/vibe-terminal/server/internal/devices"
+	"github.com/djy/vibe-terminal/server/internal/protocol"
 	"github.com/djy/vibe-terminal/server/internal/store"
 	"github.com/djy/vibe-terminal/server/internal/terminal"
+	wshub "github.com/djy/vibe-terminal/server/internal/ws"
 )
 
 type Deps struct {
@@ -24,6 +29,7 @@ type Deps struct {
 	Sessions *auth.SessionManager
 	Presence *devices.Presence
 	Audit    audit.Writer
+	Hub      *wshub.Hub
 }
 
 type router struct {
@@ -31,6 +37,7 @@ type router struct {
 	sessions *auth.SessionManager
 	presence *devices.Presence
 	audit    audit.Writer
+	hub      *wshub.Hub
 	mux      *http.ServeMux
 }
 
@@ -41,11 +48,15 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Audit.Store == nil {
 		deps.Audit = audit.Writer{Store: deps.Store}
 	}
+	if deps.Hub == nil {
+		deps.Hub = wshub.NewHub()
+	}
 	r := &router{
 		store:    deps.Store,
 		sessions: deps.Sessions,
 		presence: deps.Presence,
 		audit:    deps.Audit,
+		hub:      deps.Hub,
 		mux:      http.NewServeMux(),
 	}
 	r.routes()
@@ -66,6 +77,8 @@ func (r *router) routes() {
 	r.mux.HandleFunc("GET /api/devices", r.handleListDevices)
 	r.mux.HandleFunc("/api/devices/", r.handleDeviceRoutes)
 	r.mux.HandleFunc("/api/sessions/", r.handleSessionRoutes)
+	r.mux.HandleFunc("GET /ws/agent", r.handleAgentWebSocket)
+	r.mux.HandleFunc("GET /ws/web", r.handleWebWebSocket)
 }
 
 func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
@@ -318,6 +331,18 @@ func (r *router) handleCreateSession(w http.ResponseWriter, req *http.Request, d
 		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
 		return
 	}
+	r.hub.BindSession(session.ID, deviceID)
+	if err := r.hub.FromWeb(protocol.StartSession{
+		SessionID:        session.ID,
+		ShellPath:        body.ShellPath,
+		WorkingDirectory: body.WorkingDirectory,
+		Cols:             body.Cols,
+		Rows:             body.Rows,
+	}); err != nil {
+		_ = r.store.UpdateTerminalSessionStatus(req.Context(), session.ID, store.SessionLost, 0, 0)
+		writeError(w, http.StatusConflict, "agent_unavailable", "agent is not ready for this session")
+		return
+	}
 	_ = r.audit.Log(req.Context(), store.AuditEvent{
 		UserID:    user.ID,
 		DeviceID:  deviceID,
@@ -369,7 +394,219 @@ func (r *router) handleCloseSession(w http.ResponseWriter, req *http.Request, se
 		writeStoreError(w, err, "session")
 		return
 	}
+	_ = r.hub.FromWeb(protocol.CloseSession{SessionID: sessionID})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (r *router) handleAgentWebSocket(w http.ResponseWriter, req *http.Request) {
+	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	ctx := req.Context()
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		return
+	}
+	env, err := protocol.DecodeEnvelope(data)
+	if err != nil || env.Type != protocol.TypeAgentHello {
+		conn.Close(websocket.StatusPolicyViolation, "agent_hello required")
+		return
+	}
+	hello, err := decodePayload[protocol.AgentHello](env)
+	if err != nil || hello.ProtocolVersion != protocol.ProtocolVersion {
+		conn.Close(websocket.StatusPolicyViolation, "unsupported protocol")
+		return
+	}
+	device, err := r.store.GetDevice(ctx, hello.DeviceID)
+	if err != nil || !device.Authorized || device.CredentialHash != hashSecret(hello.Credential) {
+		conn.Close(websocket.StatusPolicyViolation, "invalid device credential")
+		return
+	}
+
+	peer := &socketPeer{conn: conn}
+	r.presence.Set(device.ID, true)
+	_ = r.store.TouchDevice(ctx, device.ID, time.Now().UTC())
+	r.hub.AttachAgent(device.ID, peer)
+	r.syncAgentSessions(ctx, device.ID, hello.Sessions)
+	defer func() {
+		r.presence.Set(device.ID, false)
+		r.hub.DetachAgent(device.ID)
+	}()
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		env, err := protocol.DecodeEnvelope(data)
+		if err != nil {
+			_ = peer.Send(wshub.Outbound{Type: protocol.TypeError, Payload: protocol.ErrorMessage{Code: "invalid_envelope", Message: "invalid protocol envelope"}})
+			continue
+		}
+		r.handleAgentEnvelope(ctx, device.ID, env, peer)
+	}
+}
+
+func (r *router) handleWebWebSocket(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	ctx := req.Context()
+	peer := &socketPeer{conn: conn}
+	defer r.hub.UnsubscribePeer(peer)
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		env, err := protocol.DecodeEnvelope(data)
+		if err != nil {
+			_ = peer.Send(wshub.Outbound{Type: protocol.TypeError, Payload: protocol.ErrorMessage{Code: "invalid_envelope", Message: "invalid protocol envelope"}})
+			continue
+		}
+		switch env.Type {
+		case protocol.TypeSubscribeSession:
+			msg, err := decodePayload[protocol.SubscribeSession](env)
+			if err != nil {
+				_ = peer.Send(errorOutbound("invalid_payload", "invalid subscribe payload"))
+				continue
+			}
+			session, err := r.store.GetTerminalSession(ctx, msg.SessionID)
+			if err != nil {
+				_ = peer.Send(errorOutbound("session_not_found", "session not found"))
+				continue
+			}
+			r.hub.BindSession(session.ID, session.DeviceID)
+			r.hub.SubscribeWeb(session.ID, peer)
+			_ = peer.Send(wshub.Outbound{
+				Type:      protocol.TypeSessionState,
+				SessionID: session.ID,
+				Payload:   protocol.SessionState{SessionID: session.ID, Status: session.Status},
+			})
+		case protocol.TypeStdin:
+			msg, err := decodePayload[protocol.Stdin](env)
+			if err != nil {
+				_ = peer.Send(errorOutbound("invalid_payload", "invalid stdin payload"))
+				continue
+			}
+			if err := r.hub.FromWeb(msg); err != nil {
+				_ = peer.Send(errorOutbound("agent_unavailable", err.Error()))
+			}
+		case protocol.TypeResize:
+			msg, err := decodePayload[protocol.Resize](env)
+			if err != nil {
+				_ = peer.Send(errorOutbound("invalid_payload", "invalid resize payload"))
+				continue
+			}
+			if err := r.hub.FromWeb(msg); err != nil {
+				_ = peer.Send(errorOutbound("agent_unavailable", err.Error()))
+			}
+		default:
+			_ = peer.Send(errorOutbound("unsupported_message", "unsupported web message"))
+		}
+	}
+}
+
+func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env protocol.Envelope, peer wshub.Peer) {
+	switch env.Type {
+	case protocol.TypeHeartbeat:
+		_ = r.store.TouchDevice(ctx, deviceID, time.Now().UTC())
+	case protocol.TypeSyncSessions:
+		msg, err := decodePayload[protocol.SyncSessions](env)
+		if err != nil {
+			_ = peer.Send(errorOutbound("invalid_payload", "invalid sync payload"))
+			return
+		}
+		r.syncAgentSessions(ctx, deviceID, msg.Sessions)
+	case protocol.TypeSessionStarted:
+		msg, err := decodePayload[protocol.SessionStarted](env)
+		if err != nil {
+			_ = peer.Send(errorOutbound("invalid_payload", "invalid session_started payload"))
+			return
+		}
+		if !r.agentOwnsSession(ctx, deviceID, msg.SessionID) {
+			_ = peer.Send(errorOutbound("session_forbidden", "session does not belong to this device"))
+			return
+		}
+		_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, store.SessionRunning, msg.AgentPID, msg.LastOutputSeq)
+		r.hub.BindSession(msg.SessionID, deviceID)
+		_ = r.hub.FromAgent(deviceID, msg)
+	case protocol.TypeStdout:
+		msg, err := decodePayload[protocol.Stdout](env)
+		if err != nil {
+			_ = peer.Send(errorOutbound("invalid_payload", "invalid stdout payload"))
+			return
+		}
+		if !r.agentOwnsSession(ctx, deviceID, msg.SessionID) {
+			_ = peer.Send(errorOutbound("session_forbidden", "session does not belong to this device"))
+			return
+		}
+		if session, err := r.store.GetTerminalSession(ctx, msg.SessionID); err == nil {
+			_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, session.Status, session.AgentPID, msg.Seq)
+		}
+		_ = r.hub.FromAgent(deviceID, msg)
+	case protocol.TypeSessionExit:
+		msg, err := decodePayload[protocol.SessionExit](env)
+		if err != nil {
+			_ = peer.Send(errorOutbound("invalid_payload", "invalid session_exit payload"))
+			return
+		}
+		if !r.agentOwnsSession(ctx, deviceID, msg.SessionID) {
+			_ = peer.Send(errorOutbound("session_forbidden", "session does not belong to this device"))
+			return
+		}
+		agentPID := 0
+		lastSeq := int64(0)
+		if session, err := r.store.GetTerminalSession(ctx, msg.SessionID); err == nil {
+			agentPID = session.AgentPID
+			lastSeq = session.LastOutputSeq
+		}
+		_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, store.SessionExited, agentPID, lastSeq)
+		_ = r.hub.FromAgent(deviceID, msg)
+	case protocol.TypeError:
+		_ = r.audit.Log(ctx, store.AuditEvent{
+			DeviceID:  deviceID,
+			EventType: "agent_error",
+			Summary:   "agent reported an error",
+		})
+	default:
+		_ = peer.Send(errorOutbound("unsupported_message", "unsupported agent message"))
+	}
+}
+
+func (r *router) agentOwnsSession(ctx context.Context, deviceID string, sessionID string) bool {
+	session, err := r.store.GetTerminalSession(ctx, sessionID)
+	return err == nil && session.DeviceID == deviceID
+}
+
+func (r *router) syncAgentSessions(ctx context.Context, deviceID string, sessions []protocol.SessionSummary) {
+	for _, summary := range sessions {
+		r.hub.BindSession(summary.SessionID, deviceID)
+		if _, err := r.store.GetTerminalSession(ctx, summary.SessionID); errors.Is(err, store.ErrNotFound) {
+			_, _ = r.store.CreateTerminalSession(ctx, store.TerminalSession{
+				ID:               summary.SessionID,
+				DeviceID:         deviceID,
+				Title:            valueOr(summary.Title, "shell"),
+				ShellPath:        valueOr(summary.ShellPath, "/bin/bash"),
+				WorkingDirectory: valueOr(summary.WorkingDirectory, "$HOME"),
+				Status:           valueOr(summary.Status, store.SessionRunning),
+				AgentPID:         summary.AgentPID,
+				LastOutputSeq:    summary.LastOutputSeq,
+			})
+			continue
+		}
+		_ = r.store.UpdateTerminalSessionStatus(ctx, summary.SessionID, valueOr(summary.Status, store.SessionRunning), summary.AgentPID, summary.LastOutputSeq)
+	}
 }
 
 func (r *router) handleSessionOutput(w http.ResponseWriter, req *http.Request, sessionID string) {
@@ -471,4 +708,43 @@ func randomToken() (string, error) {
 func hashSecret(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+type socketPeer struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (p *socketPeer) Send(msg wshub.Outbound) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := protocol.EncodeEnvelope(msg.Type, msg.Payload)
+	if err != nil {
+		return err
+	}
+	return p.conn.Write(ctx, websocket.MessageText, data)
+}
+
+func decodePayload[T any](env protocol.Envelope) (T, error) {
+	var payload T
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return payload, err
+	}
+	return payload, nil
+}
+
+func errorOutbound(code string, message string) wshub.Outbound {
+	return wshub.Outbound{
+		Type:    protocol.TypeError,
+		Payload: protocol.ErrorMessage{Code: code, Message: message},
+	}
+}
+
+func valueOr(value string, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }

@@ -66,23 +66,12 @@ jobs:
           - os: ubuntu-latest
             artifact_name: vibe-agent-linux-x86_64
             asset_name: vibe-agent-linux-x86_64.tar.gz
-            binary_name: vibe-agent
-            archive: tar
           - os: macos-15-intel
             artifact_name: vibe-agent-macos-x86_64
             asset_name: vibe-agent-macos-x86_64.tar.gz
-            binary_name: vibe-agent
-            archive: tar
           - os: macos-14
             artifact_name: vibe-agent-macos-aarch64
             asset_name: vibe-agent-macos-aarch64.tar.gz
-            binary_name: vibe-agent
-            archive: tar
-          - os: windows-latest
-            artifact_name: vibe-agent-windows-x86_64
-            asset_name: vibe-agent-windows-x86_64.zip
-            binary_name: vibe-agent.exe
-            archive: zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -98,22 +87,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release --manifest-path agent/Cargo.toml
 
-      - name: Package Unix binary
-        if: matrix.archive == 'tar'
+      - name: Package agent binary
         shell: bash
         run: |
           mkdir -p dist-agent/${{ matrix.artifact_name }}
-          cp agent/target/release/${{ matrix.binary_name }} dist-agent/${{ matrix.artifact_name }}/${{ matrix.binary_name }}
-          chmod +x dist-agent/${{ matrix.artifact_name }}/${{ matrix.binary_name }}
-          tar -czf dist-agent/${{ matrix.asset_name }} -C dist-agent/${{ matrix.artifact_name }} ${{ matrix.binary_name }}
-
-      - name: Package Windows binary
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "dist-agent/${{ matrix.artifact_name }}" | Out-Null
-          Copy-Item "agent/target/release/${{ matrix.binary_name }}" "dist-agent/${{ matrix.artifact_name }}/${{ matrix.binary_name }}"
-          Compress-Archive -Path "dist-agent/${{ matrix.artifact_name }}/${{ matrix.binary_name }}" -DestinationPath "dist-agent/${{ matrix.asset_name }}" -Force
+          cp agent/target/release/vibe-agent dist-agent/${{ matrix.artifact_name }}/vibe-agent
+          chmod +x dist-agent/${{ matrix.artifact_name }}/vibe-agent
+          tar -czf dist-agent/${{ matrix.asset_name }} -C dist-agent/${{ matrix.artifact_name }} vibe-agent
 
       - name: Upload agent artifact
         uses: actions/upload-artifact@v4

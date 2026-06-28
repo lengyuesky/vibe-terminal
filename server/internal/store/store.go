@@ -392,6 +392,23 @@ func (db *DB) ListDevices(ctx context.Context) ([]Device, error) {
 	return devices, rows.Err()
 }
 
+func (db *DB) UpdateDeviceName(ctx context.Context, id string, name string) error {
+	result, err := db.SQL.ExecContext(ctx,
+		`update devices set name = ?, updated_at = ? where id = ?`,
+		name, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) TouchDevice(ctx context.Context, id string, seenAt time.Time) error {
 	result, err := db.SQL.ExecContext(ctx,
 		`update devices set last_seen_at = ?, updated_at = ? where id = ?`,

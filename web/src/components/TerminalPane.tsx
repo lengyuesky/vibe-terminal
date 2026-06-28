@@ -5,7 +5,13 @@ import 'xterm/css/xterm.css';
 import * as api from '../api';
 import { encodeResize, encodeStdin, encodeSubscribe, webSocketURL, type TerminalEvent } from '../ws';
 
-export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readOnly: boolean }) {
+type TerminalPaneProps = {
+  sessionId: string;
+  readOnly: boolean;
+  onSessionStateChange?: (sessionId: string, status: string, message?: string) => void;
+};
+
+export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: TerminalPaneProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
 
@@ -105,6 +111,9 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
               restoredSeq = message.payload.seq;
             }
           }
+          if (message.type === 'session_state' && message.session_id === sessionId) {
+            onSessionStateChange?.(sessionId, message.payload.status, message.payload.message);
+          }
         });
         terminal.onData((data) => {
           if (suppressTerminalData) {
@@ -115,9 +124,15 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
           }
         });
         socket.addEventListener('close', () => {
+          if (cancelled) {
+            return;
+          }
           setConnectionMessage('Terminal connection closed.');
         });
         socket.addEventListener('error', () => {
+          if (cancelled) {
+            return;
+          }
           setConnectionMessage('Terminal connection error.');
         });
       }
@@ -131,7 +146,7 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
       socket?.close();
       terminal?.dispose();
     };
-  }, [sessionId, readOnly]);
+  }, [sessionId, readOnly, onSessionStateChange]);
 
   return (
     <div className="terminalPaneShell">

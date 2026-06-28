@@ -338,22 +338,9 @@ func (r *router) handleListDevices(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "device_error", "failed to list devices")
 		return
 	}
-	type deviceResponse struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Platform     string `json:"platform"`
-		AgentVersion string `json:"agent_version"`
-		Online       bool   `json:"online"`
-	}
-	out := make([]deviceResponse, 0, len(devices))
+	out := make([]map[string]any, 0, len(devices))
 	for _, device := range devices {
-		out = append(out, deviceResponse{
-			ID:           device.ID,
-			Name:         device.Name,
-			Platform:     device.Platform,
-			AgentVersion: device.AgentVersion,
-			Online:       r.presence.Online(device.ID),
-		})
+		out = append(out, deviceResponse(device, r.presence.Online(device.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -361,7 +348,19 @@ func (r *router) handleListDevices(w http.ResponseWriter, req *http.Request) {
 func (r *router) handleDeviceRoutes(w http.ResponseWriter, req *http.Request) {
 	rest := strings.TrimPrefix(req.URL.Path, "/api/devices/")
 	deviceID, suffix, ok := strings.Cut(rest, "/")
-	if !ok || suffix != "sessions" {
+	if deviceID == "" {
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
+		return
+	}
+	if !ok || suffix == "" {
+		if req.Method == http.MethodPatch {
+			r.handleRenameDevice(w, req, deviceID)
+			return
+		}
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
+		return
+	}
+	if suffix != "sessions" {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
@@ -373,6 +372,33 @@ func (r *router) handleDeviceRoutes(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+func (r *router) handleRenameDevice(w http.ResponseWriter, req *http.Request, deviceID string) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, req, &body) {
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_name", "name is required")
+		return
+	}
+	if err := r.store.UpdateDeviceName(req.Context(), deviceID, name); err != nil {
+		writeStoreError(w, err, "device")
+		return
+	}
+	device, err := r.store.GetDevice(req.Context(), deviceID)
+	if err != nil {
+		writeStoreError(w, err, "device")
+		return
+	}
+	writeJSON(w, http.StatusOK, deviceResponse(device, r.presence.Online(device.ID)))
 }
 
 func (r *router) handleCreateSession(w http.ResponseWriter, req *http.Request, deviceID string) {
@@ -656,7 +682,11 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 			return
 		}
 		if session, err := r.store.GetTerminalSession(ctx, msg.SessionID); err == nil {
-			_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, session.Status, session.AgentPID, msg.Seq)
+			status := session.Status
+			if status == store.SessionStarting {
+				status = store.SessionRunning
+			}
+			_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, status, session.AgentPID, msg.Seq)
 		}
 		r.persistOutputChunk(ctx, msg)
 		_ = r.hub.FromAgent(deviceID, msg)
@@ -681,7 +711,11 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 			}
 		}
 		_ = r.store.UpdateTerminalSessionStatus(ctx, msg.SessionID, status, agentPID, lastSeq)
-		_ = r.hub.FromAgent(deviceID, msg)
+		_ = r.hub.FromAgent(deviceID, protocol.SessionState{
+			SessionID: msg.SessionID,
+			Status:    status,
+			Message:   msg.Message,
+		})
 	case protocol.TypeError:
 		_ = r.audit.Log(ctx, store.AuditEvent{
 			DeviceID:  deviceID,
@@ -859,6 +893,16 @@ func userResponse(user store.User) map[string]string {
 	return map[string]string{
 		"id":       user.ID,
 		"username": user.Username,
+	}
+}
+
+func deviceResponse(device store.Device, online bool) map[string]any {
+	return map[string]any{
+		"id":            device.ID,
+		"name":          device.Name,
+		"platform":      device.Platform,
+		"agent_version": device.AgentVersion,
+		"online":        online,
 	}
 }
 

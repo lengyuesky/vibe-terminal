@@ -213,4 +213,17 @@ func TestDeviceSessionAndOutputRoundTrip(t *testing.T) {
 	if len(chunks) != 1 || chunks[0].EndSeq != 7 {
 		t.Fatalf("unexpected chunks: %#v", chunks)
 	}
+	if err := db.UpdateDeviceName(ctx, "dev-1", "office-laptop"); err != nil {
+		t.Fatalf("update device name: %v", err)
+	}
+	device, err := db.GetDevice(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("get renamed device: %v", err)
+	}
+	if device.Name != "office-laptop" {
+		t.Fatalf("device name = %q, want office-laptop", device.Name)
+	}
+	if err := db.UpdateDeviceName(ctx, "missing", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing device error = %v, want ErrNotFound", err)
+	}
 }

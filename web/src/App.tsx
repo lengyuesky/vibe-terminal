@@ -10,6 +10,15 @@ import { TerminalTabs } from './components/TerminalTabs';
 type SessionsByDevice = Record<string, Session[]>;
 type ViewMode = 'terminals' | 'agentTokens';
 
+function enrichSessionDevice(session: Session, deviceId: string, device?: Device): Session {
+  return {
+    ...session,
+    device_id: session.device_id ?? deviceId,
+    device_name: device?.name ?? session.device_name,
+    device_platform: device?.platform ?? session.device_platform,
+  };
+}
+
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -73,6 +82,12 @@ export function App() {
     return api.renameSession(sessionId, title);
   }
 
+  async function handleRenameDevice(deviceId: string, name: string) {
+    const updated = await api.renameDevice(deviceId, name);
+    setDevices((current) => current.map((device) => (device.id === deviceId ? updated : device)));
+    return updated;
+  }
+
   const loadAgentTokens = useCallback(async () => {
     setTokenLoading(true);
     setTokenError(null);
@@ -128,6 +143,7 @@ export function App() {
       onLogin={handleLogin}
       onCloseSession={handleCloseSession}
       onCreateSession={handleCreateSession}
+      onRenameDevice={handleRenameDevice}
       onRenameSession={handleRenameSession}
       agentTokens={agentTokens}
       createdAgentToken={createdAgentToken}
@@ -148,6 +164,7 @@ export function AppView({
   onLogin,
   onCloseSession,
   onCreateSession,
+  onRenameDevice = async () => undefined,
   onRenameSession,
   agentTokens,
   createdAgentToken,
@@ -164,6 +181,7 @@ export function AppView({
   onLogin: (username: string, password: string) => Promise<void>;
   onCloseSession: (sessionId: string) => Promise<void>;
   onCreateSession: (deviceId: string) => Promise<Session | void>;
+  onRenameDevice?: (deviceId: string, name: string) => Promise<Device | void>;
   onRenameSession: (sessionId: string, title: string) => Promise<Session | void>;
   agentTokens: AgentToken[];
   createdAgentToken: CreatedAgentToken | null;
@@ -174,9 +192,22 @@ export function AppView({
   onDeleteAgentToken?: (id: string) => Promise<void>;
   onRefreshAgentTokens: () => Promise<void>;
 }) {
-  const initialSessions = useMemo(() => Object.values(sessions).flat(), [sessions]);
+  const devicesById = useMemo(() => new Map(devices.map((device) => [device.id, device])), [devices]);
+  const initialSessions = useMemo(
+    () =>
+      Object.entries(sessions).flatMap(([deviceId, deviceSessions]) => {
+        const device = devicesById.get(deviceId);
+        return deviceSessions.map((session) => enrichSessionDevice(session, deviceId, device));
+      }),
+    [devicesById, sessions]
+  );
+  const [localDevices, setLocalDevices] = useState<Device[]>(devices);
   const [localSessions, setLocalSessions] = useState<Session[]>(initialSessions);
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
+
+  useEffect(() => {
+    setLocalDevices(devices);
+  }, [devices]);
 
   useEffect(() => {
     setLocalSessions(initialSessions);
@@ -185,8 +216,24 @@ export function AppView({
   async function createAndAppend(deviceId: string) {
     const session = await onCreateSession(deviceId);
     if (session) {
-      setLocalSessions((current) => [...current, session]);
+      const device = localDevices.find((item) => item.id === deviceId);
+      setLocalSessions((current) => [...current, enrichSessionDevice(session, deviceId, device)]);
     }
+  }
+
+  async function renameDeviceAndApply(deviceId: string, name: string) {
+    const updated = await onRenameDevice(deviceId, name);
+    const fallback = localDevices.find((device) => device.id === deviceId);
+    const nextDevice = updated ?? (fallback ? { ...fallback, name } : undefined);
+    if (!nextDevice) return;
+    setLocalDevices((current) => current.map((device) => (device.id === deviceId ? nextDevice : device)));
+    setLocalSessions((current) =>
+      current.map((session) =>
+        session.device_id === deviceId
+          ? { ...session, device_name: nextDevice.name, device_platform: nextDevice.platform }
+          : session
+      )
+    );
   }
 
   if (!user) return <LoginView onLogin={onLogin} />;
@@ -203,7 +250,7 @@ export function AppView({
             Agent Tokens
           </button>
         </nav>
-        <DeviceList devices={devices} onCreateSession={createAndAppend} compact />
+        <DeviceList devices={localDevices} onCreateSession={createAndAppend} onRenameDevice={renameDeviceAndApply} compact />
       </aside>
       {viewMode === 'terminals' ? (
         <TerminalTabs

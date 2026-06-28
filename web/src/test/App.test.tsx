@@ -16,6 +16,7 @@ vi.mock('../api', () => ({
   login: vi.fn(),
   me: vi.fn(),
   revokeAgentToken: vi.fn(),
+  renameDevice: vi.fn(),
   renameSession: vi.fn(),
 }));
 
@@ -85,8 +86,9 @@ describe('AppView', () => {
 
     render(<App />);
 
-    expect(await screen.findByRole('tab', { name: /sess-res/i })).toBeInTheDocument();
-    expect(await screen.findByText(/\/srv\/app/)).toBeInTheDocument();
+    const tab = await screen.findByRole('tab', { name: /sess-res/i });
+    expect(tab).toBeInTheDocument();
+    expect(within(tab).getByText('/srv/app')).toBeInTheDocument();
     expect(mockedApi.listSessions).toHaveBeenCalledWith('dev-1');
   });
 
@@ -119,6 +121,116 @@ describe('AppView', () => {
     expect(screen.getByText('/work/agent')).toBeInTheDocument();
     expect(screen.getByText('running')).toHaveClass('statusRunning');
     expect(screen.getByText('lost')).toHaveClass('statusLost');
+  });
+
+  it('shows the owning device in terminal tabs and the active terminal header', () => {
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[{ id: 'dev-1', name: 'office-laptop', platform: 'linux', online: true }]}
+        sessions={{
+          'dev-1': [
+            {
+              id: 'sess-running-1234',
+              title: 'shell',
+              status: 'running',
+              shell_path: '/bin/bash',
+              working_directory: '/work/app',
+            },
+          ],
+        }}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
+      />
+    );
+
+    const tab = screen.getByRole('tab', { name: /bash/i });
+    expect(within(tab).getByText('bash')).toBeInTheDocument();
+    expect(within(tab).getByText('office-laptop')).toHaveClass('tabDeviceBadge');
+    expect(screen.getByRole('heading', { name: /bash office-laptop/i })).toBeInTheDocument();
+    expect(screen.getByText('linux · /work/app · session sess-running-1234')).toBeInTheDocument();
+  });
+
+  it('keeps custom session titles instead of replacing them with the shell path', () => {
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[{ id: 'dev-1', name: 'office-laptop', platform: 'linux', online: true }]}
+        sessions={{
+          'dev-1': [
+            {
+              id: 'sess-custom-title',
+              title: 'api server',
+              status: 'running',
+              shell_path: '/usr/bin/zsh',
+              working_directory: '/srv/api',
+            },
+          ],
+        }}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
+      />
+    );
+
+    const tab = screen.getByRole('tab', { name: /api server/i });
+    expect(within(tab).getByText('api server')).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /zsh/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /api server office-laptop/i })).toBeInTheDocument();
+  });
+
+  it('renames devices from the device list', async () => {
+    const renameDevice = vi.fn().mockResolvedValue({
+      id: 'dev-1',
+      name: 'office-laptop',
+      platform: 'linux',
+      online: true,
+    });
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
+        sessions={{}}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        onRenameDevice={renameDevice}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /rename laptop/i }));
+    const input = await screen.findByRole('textbox', { name: /device name/i });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'office-laptop');
+    await userEvent.click(screen.getByRole('button', { name: /save device name/i }));
+
+    expect(renameDevice).toHaveBeenCalledWith('dev-1', 'office-laptop');
+    expect(await screen.findByText('office-laptop')).toBeInTheDocument();
   });
 
   it('hides closed sessions from terminal tabs', () => {

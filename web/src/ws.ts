@@ -1,6 +1,6 @@
 export type TerminalEvent =
   | { type: 'stdout'; session_id: string; payload: { seq: number; data: string } }
-  | { type: 'session_state'; session_id: string; payload: { status: string; message?: string } }
+  | { type: 'session_state'; session_id: string; payload: { session_id?: string; status: string; message?: string } }
   | { type: 'error'; payload: { code: string; message: string } };
 
 export function encodeStdin(sessionId: string, data: string): string {

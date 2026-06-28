@@ -3,6 +3,8 @@ export type Device = { id: string; name: string; platform: string; online: boole
 export type Session = {
   id: string;
   device_id?: string;
+  device_name?: string;
+  device_platform?: string;
   title: string;
   status: string;
   shell_path?: string;
@@ -83,6 +85,13 @@ export function deleteAgentToken(id: string): Promise<void> {
 
 export function listDevices(): Promise<Device[]> {
   return request<Device[]>('/api/devices');
+}
+
+export function renameDevice(deviceId: string, name: string): Promise<Device> {
+  return request<Device>(`/api/devices/${deviceId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
 }
 
 export function listSessions(deviceId: string): Promise<Session[]> {

@@ -138,13 +138,30 @@ input {
   border-bottom: 1px solid #282d35;
 }
 
-.deviceRow div {
+.deviceIdentity {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .deviceRow span {
   color: #a8b0bd;
+}
+
+.deviceActions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.deviceActions .iconButton,
+.deviceRenameForm .iconButton {
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  width: 34px;
+  padding: 0;
 }
 
 .online {
@@ -159,7 +176,7 @@ input {
 .terminalArea {
   min-width: 0;
   display: grid;
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-rows: 52px 58px minmax(0, 1fr);
 }
 
 .tabs {
@@ -191,8 +208,22 @@ input {
   text-align: left;
 }
 
-.tabTitle,
+.tabTitleLine,
 .tabMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabTitleLine {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.tabTitle {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -212,6 +243,31 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tabDeviceBadge,
+.terminalDeviceBadge {
+  flex: 0 0 auto;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid #5b7696;
+  border-radius: 6px;
+  background: rgba(91, 118, 150, 0.22);
+  color: #e5edf7;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.tabDeviceBadge {
+  padding: 1px 6px;
+  font-size: 12px;
+}
+
+.terminalDeviceBadge {
+  padding: 2px 8px;
+  font-size: 13px;
 }
 
 .tabSeparator,
@@ -564,6 +620,49 @@ input {
   background: #0f1115;
   color: #f4f5f7;
   padding: 0 10px;
+}
+
+.deviceRenameForm {
+  min-width: 0;
+}
+
+.deviceRenameForm label {
+  width: min(190px, calc(100vw - 96px));
+}
+
+.terminalHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid #282d35;
+  background: #15181d;
+}
+
+.terminalHeader div {
+  min-width: 0;
+}
+
+.terminalHeader h1 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 650;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  max-width: 100%;
+}
+
+.terminalHeader p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a8b0bd;
+  font-size: 12px;
 }
 
 .terminalPaneShell {

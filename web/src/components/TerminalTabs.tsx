@@ -1,5 +1,5 @@
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Check, Pencil, X } from 'lucide-react';
 import type { Session } from '../api';
 import { TerminalPane } from './TerminalPane';
@@ -13,6 +13,14 @@ type TerminalTabsProps = {
 
 function sessionDirectory(session: Session) {
   return session.working_directory || '$HOME';
+}
+
+function sessionDeviceName(session: Session) {
+  return session.device_name || session.device_id || 'Unknown device';
+}
+
+function shellName(shellPath: string) {
+  return shellPath.split('/').filter(Boolean).pop() || shellPath;
 }
 
 function shortSessionId(id: string) {
@@ -44,6 +52,15 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
   const [pendingSession, setPendingSession] = useState<string | null>(null);
   const visibleSessions = sessions.filter((session) => session.status !== 'closed');
 
+  const handleSessionStateChange = useCallback(
+    (sessionId: string, status: string) => {
+      onSessionsChange((current) =>
+        current.map((session) => (session.id === sessionId ? { ...session, status } : session))
+      );
+    },
+    [onSessionsChange]
+  );
+
   useEffect(() => {
     if (!active && visibleSessions[0]) {
       setActive(visibleSessions[0].id);
@@ -59,6 +76,9 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
   }, [active, sessions]);
 
   function sessionLabel(session: Session) {
+    if (session.title === 'shell' && session.shell_path) {
+      return shellName(session.shell_path);
+    }
     return session.title || session.id;
   }
 
@@ -122,6 +142,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
           const label = sessionLabel(session);
           const isPending = pendingSession === session.id;
           const directory = sessionDirectory(session);
+          const deviceName = sessionDeviceName(session);
           return (
             <div className="tabItem" key={session.id}>
               <button
@@ -130,7 +151,12 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                 aria-selected={session.id === activeSession.id}
                 onClick={() => setActive(session.id)}
               >
-                <span className="tabTitle">{label}</span>
+                <span className="tabTitleLine">
+                  <span className="tabTitle">{label}</span>
+                  <span className="tabDeviceBadge" title={deviceName}>
+                    {deviceName}
+                  </span>
+                </span>
                 <small className="tabMeta">
                   <span className="tabDirectory" title={directory}>
                     {directory}
@@ -211,7 +237,24 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
           );
         })}
       </div>
-      <TerminalPane sessionId={activeSession.id} readOnly={activeSession.status === 'closed' || activeSession.status === 'exited' || activeSession.status === 'lost'} />
+      <header className="terminalHeader">
+        <div>
+          <h1>
+            <span>{sessionLabel(activeSession)}</span>
+            <span className="terminalDeviceBadge">{sessionDeviceName(activeSession)}</span>
+          </h1>
+          <p>
+            {[activeSession.device_platform, sessionDirectory(activeSession), `session ${activeSession.id}`]
+              .filter(Boolean)
+              .join(' · ')}
+          </p>
+        </div>
+      </header>
+      <TerminalPane
+        sessionId={activeSession.id}
+        readOnly={activeSession.status === 'closed' || activeSession.status === 'exited' || activeSession.status === 'lost'}
+        onSessionStateChange={handleSessionStateChange}
+      />
     </main>
   );
 }

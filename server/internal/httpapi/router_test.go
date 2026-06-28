@@ -282,6 +282,71 @@ func TestCreateSessionRequiresOnlineDevice(t *testing.T) {
 	}
 }
 
+func TestRenameDeviceUpdatesNameAndRejectsEmptyName(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.NewStore(t)
+	_, err := db.CreateDevice(ctx, store.Device{
+		ID: "dev-1", Name: "box", Platform: "linux", AgentVersion: "0.1.0",
+		Fingerprint: "fp", CredentialHash: "hash", Authorized: true,
+	})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	hash, err := auth.HashPassword("secret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	_, err = db.CreateUser(ctx, store.User{ID: "user-1", Username: "admin", PasswordHash: hash})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	handler := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+	})
+	loginRR := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(loginRR, loginReq)
+	cookies := loginRR.Result().Cookies()
+
+	emptyReq := httptest.NewRequest(http.MethodPatch, "/api/devices/dev-1", bytes.NewBufferString(`{"name":"   "}`))
+	emptyReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		emptyReq.AddCookie(cookie)
+	}
+	emptyRR := httptest.NewRecorder()
+	handler.ServeHTTP(emptyRR, emptyReq)
+	if emptyRR.Code != http.StatusBadRequest {
+		t.Fatalf("empty rename status = %d body=%s", emptyRR.Code, emptyRR.Body.String())
+	}
+
+	renameReq := httptest.NewRequest(http.MethodPatch, "/api/devices/dev-1", bytes.NewBufferString(`{"name":"office-laptop"}`))
+	renameReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		renameReq.AddCookie(cookie)
+	}
+	renameRR := httptest.NewRecorder()
+	handler.ServeHTTP(renameRR, renameReq)
+	if renameRR.Code != http.StatusOK {
+		t.Fatalf("rename status = %d body=%s", renameRR.Code, renameRR.Body.String())
+	}
+	var renamed map[string]any
+	if err := json.Unmarshal(renameRR.Body.Bytes(), &renamed); err != nil {
+		t.Fatalf("decode rename response: %v", err)
+	}
+	if renamed["name"] != "office-laptop" || renamed["online"] != false {
+		t.Fatalf("rename response = %#v", renamed)
+	}
+	device, err := db.GetDevice(ctx, "dev-1")
+	if err != nil {
+		t.Fatalf("get renamed device: %v", err)
+	}
+	if device.Name != "office-laptop" {
+		t.Fatalf("device name = %q, want office-laptop", device.Name)
+	}
+}
+
 func TestSessionCloseIsHiddenFromListAndRenameUpdatesTitle(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.NewStore(t)
@@ -375,6 +440,97 @@ func TestSessionCloseIsHiddenFromListAndRenameUpdatesTitle(t *testing.T) {
 	}
 	if len(listed) != 0 {
 		t.Fatalf("closed sessions should be hidden, got %#v", listed)
+	}
+}
+
+func TestSessionExitBroadcastsSessionStateToWebSubscribers(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.NewStore(t)
+	_, err := db.CreateDevice(ctx, store.Device{
+		ID: "dev-1", Name: "box", Platform: "linux", AgentVersion: "0.1.0",
+		Fingerprint: "fp", CredentialHash: "hash", Authorized: true,
+	})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	_, err = db.CreateTerminalSession(ctx, store.TerminalSession{
+		ID: "sess-1", DeviceID: "dev-1", Title: "shell", ShellPath: "/bin/bash",
+		WorkingDirectory: "/tmp", Status: store.SessionRunning,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	hub := wshub.NewHub()
+	web := wshub.NewMemoryPeer("web")
+	hub.BindSession("sess-1", "dev-1")
+	hub.SubscribeWeb("sess-1", web)
+	r := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+		Hub:      hub,
+	}).(*router)
+	exitPayload, err := json.Marshal(protocol.SessionExit{SessionID: "sess-1", ExitCode: 0, Message: "exited"})
+	if err != nil {
+		t.Fatalf("marshal session exit: %v", err)
+	}
+
+	r.handleAgentEnvelope(ctx, "dev-1", protocol.Envelope{
+		Type:      protocol.TypeSessionExit,
+		SessionID: "sess-1",
+		Payload:   exitPayload,
+	}, wshub.NewMemoryPeer("agent"))
+
+	got := web.Pop()
+	if got.Type != protocol.TypeSessionState {
+		t.Fatalf("broadcast type = %q, want %q", got.Type, protocol.TypeSessionState)
+	}
+	state, ok := got.Payload.(protocol.SessionState)
+	if !ok {
+		t.Fatalf("broadcast payload = %#v, want protocol.SessionState", got.Payload)
+	}
+	if state.SessionID != "sess-1" || state.Status != store.SessionExited || state.Message != "exited" {
+		t.Fatalf("broadcast state = %#v", state)
+	}
+}
+
+func TestStdoutFromStartingSessionMarksSessionRunning(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.NewStore(t)
+	_, err := db.CreateDevice(ctx, store.Device{
+		ID: "dev-1", Name: "box", Platform: "linux", AgentVersion: "0.1.0",
+		Fingerprint: "fp", CredentialHash: "hash", Authorized: true,
+	})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	_, err = db.CreateTerminalSession(ctx, store.TerminalSession{
+		ID: "sess-1", DeviceID: "dev-1", Title: "shell", ShellPath: "/bin/bash",
+		WorkingDirectory: "/tmp", Status: store.SessionStarting,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	r := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+	}).(*router)
+	stdoutPayload, err := json.Marshal(protocol.Stdout{SessionID: "sess-1", Seq: 3, Data: "prompt"})
+	if err != nil {
+		t.Fatalf("marshal stdout: %v", err)
+	}
+
+	r.handleAgentEnvelope(ctx, "dev-1", protocol.Envelope{
+		Type:      protocol.TypeStdout,
+		SessionID: "sess-1",
+		Payload:   stdoutPayload,
+	}, wshub.NewMemoryPeer("agent"))
+
+	session, err := db.GetTerminalSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Status != store.SessionRunning || session.LastOutputSeq != 3 {
+		t.Fatalf("session after stdout = %#v", session)
 	}
 }
 

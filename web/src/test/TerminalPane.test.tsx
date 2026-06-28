@@ -1,7 +1,10 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import type { Session } from '../api';
 import { TerminalPane } from '../components/TerminalPane';
+import { TerminalTabs } from '../components/TerminalTabs';
 
 const terminalState = vi.hoisted(() => ({
   instances: [] as Array<{
@@ -178,6 +181,56 @@ describe('TerminalPane', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(terminalState.instances[0].write).not.toHaveBeenCalledWith('late output', expect.any(Function));
+  });
+
+  it('does not show a connection closed message when switching sessions', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+
+    const { rerender } = render(<TerminalPane sessionId="sess-1" readOnly={false} />);
+    await waitFor(() => expect(webSocketState.instances.length).toBe(1));
+    const oldSocket = webSocketState.instances[0];
+
+    rerender(<TerminalPane sessionId="sess-2" readOnly={false} />);
+    await waitFor(() => expect(webSocketState.instances.length).toBe(2));
+
+    oldSocket.emit('close');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('updates the tab status when the websocket reports session state', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+
+    function TerminalTabsHost() {
+      const [sessions, setSessions] = useState<Session[]>([
+        { id: 'sess-1', title: 'bash', status: 'running', working_directory: '/tmp/project' },
+      ]);
+      return (
+        <TerminalTabs
+          sessions={sessions}
+          onSessionsChange={setSessions}
+          onCloseSession={vi.fn()}
+          onRenameSession={vi.fn()}
+        />
+      );
+    }
+
+    render(<TerminalTabsHost />);
+
+    await waitFor(() => expect(webSocketState.instances.length).toBe(1));
+    expect(screen.getByText('running')).toHaveClass('statusRunning');
+
+    webSocketState.instances[0].emit('message', {
+      data: JSON.stringify({
+        type: 'session_state',
+        session_id: 'sess-1',
+        payload: { session_id: 'sess-1', status: 'exited', message: 'exited' },
+      }),
+    });
+
+    expect(await screen.findByText('exited')).toHaveClass('statusExited');
+    expect(screen.queryByText('running')).not.toBeInTheDocument();
   });
 
   it('sends resize when the terminal container changes size', async () => {

@@ -39,8 +39,14 @@ export function AgentTokenManager({
   const [name, setName] = useState('agent');
   const [ttlHours, setTtlHours] = useState('24');
   const [submitting, setSubmitting] = useState(false);
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [copyTokenState, setCopyTokenState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [copyCommandState, setCopyCommandState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [pendingRevokeId, setPendingRevokeId] = useState<string | null>(null);
+  const registerCommand = createdToken
+    ? `vibe-agent register --server ${window.location.origin} --token ${createdToken.token}`
+    : '';
+  const runCommand = 'vibe-agent run';
+  const agentCommand = `${registerCommand}\n${runCommand}`;
   const sortedTokens = useMemo(
     () => [...tokens].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
     [tokens]
@@ -57,7 +63,8 @@ export function AgentTokenManager({
       await onCreate(name.trim() || 'agent', Math.max(1, Number(ttlHours) || 1));
       setName('agent');
       setTtlHours('24');
-      setCopyState('idle');
+      setCopyTokenState('idle');
+      setCopyCommandState('idle');
     } catch {
       return;
     } finally {
@@ -78,9 +85,19 @@ export function AgentTokenManager({
     if (!createdToken) return;
     try {
       await navigator.clipboard.writeText(createdToken.token);
-      setCopyState('copied');
+      setCopyTokenState('copied');
     } catch {
-      setCopyState('failed');
+      setCopyTokenState('failed');
+    }
+  }
+
+  async function copyAgentCommand() {
+    if (!createdToken) return;
+    try {
+      await navigator.clipboard.writeText(agentCommand);
+      setCopyCommandState('copied');
+    } catch {
+      setCopyCommandState('failed');
     }
   }
 
@@ -120,13 +137,35 @@ export function AgentTokenManager({
         </form>
         {createdToken && (
           <div className="newToken" role="status">
-            <span>New token</span>
-            <code>{createdToken.token}</code>
-            <button type="button" className="iconTextButton" onClick={copyToken}>
-              {copyState === 'copied' ? <Check size={16} aria-hidden="true" /> : <Clipboard size={16} aria-hidden="true" />}
-              {copyState === 'copied' ? 'Copied' : 'Copy'}
-            </button>
-            {copyState === 'failed' && <span className="error">Copy failed</span>}
+            <div className="newTokenItem">
+              <span>Token</span>
+              <code>{createdToken.token}</code>
+              <button type="button" className="iconTextButton" onClick={copyToken}>
+                {copyTokenState === 'copied' ? (
+                  <Check size={16} aria-hidden="true" />
+                ) : (
+                  <Clipboard size={16} aria-hidden="true" />
+                )}
+                {copyTokenState === 'copied' ? 'Copied' : 'Copy token'}
+              </button>
+              {copyTokenState === 'failed' && <span className="error">Copy failed</span>}
+            </div>
+            <div className="newTokenItem">
+              <span>Agent command</span>
+              <pre className="agentCommand">
+                <code>{registerCommand}</code>
+                <code>{runCommand}</code>
+              </pre>
+              <button type="button" className="iconTextButton" onClick={copyAgentCommand}>
+                {copyCommandState === 'copied' ? (
+                  <Check size={16} aria-hidden="true" />
+                ) : (
+                  <Clipboard size={16} aria-hidden="true" />
+                )}
+                {copyCommandState === 'copied' ? 'Copied' : 'Copy command'}
+              </button>
+              {copyCommandState === 'failed' && <span className="error">Copy failed</span>}
+            </div>
           </div>
         )}
       </section>

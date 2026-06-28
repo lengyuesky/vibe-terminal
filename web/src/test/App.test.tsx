@@ -272,6 +272,10 @@ describe('AppView', () => {
 
     expect(createToken).toHaveBeenCalledWith('rack', 12);
     expect(screen.getByText('raw-token-once')).toBeInTheDocument();
+    expect(
+      screen.getByText(`vibe-agent register --server ${window.location.origin} --token raw-token-once`)
+    ).toBeInTheDocument();
+    expect(screen.getByText('vibe-agent run')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /revoke/i }));
     expect(revokeToken).not.toHaveBeenCalled();

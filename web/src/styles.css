@@ -356,19 +356,37 @@ input {
 
 .newToken {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 10px;
-  align-items: center;
+  gap: 12px;
   padding: 12px;
   border: 1px solid #2f9d64;
   border-radius: 8px;
   background: rgba(47, 157, 100, 0.12);
 }
 
-.newToken code {
+.newTokenItem {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.newTokenItem > span:first-child {
+  color: #b9c0cc;
+  font-weight: 600;
+}
+
+.newToken code,
+.agentCommand {
   min-width: 0;
   overflow-wrap: anywhere;
   color: #d6ffe5;
+}
+
+.agentCommand {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .tokenTableWrap {
@@ -450,7 +468,7 @@ input {
   }
 
   .tokenForm,
-  .newToken {
+  .newTokenItem {
     grid-template-columns: 1fr;
   }
 }

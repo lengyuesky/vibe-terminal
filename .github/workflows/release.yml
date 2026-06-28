@@ -17,8 +17,32 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  changes:
+    name: Detect Docker changes
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docker:
+              - 'server/**'
+              - 'web/**'
+              - 'server/Dockerfile'
+              - 'docker-compose.yml'
+              - '.github/workflows/release.yml'
+
   docker:
     name: Build and publish Docker image
+    needs:
+      - changes
+    if: startsWith(github.ref, 'refs/tags/v') || needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -26,6 +26,7 @@ export function AgentTokenManager({
   createdToken,
   onCreate,
   onRevoke,
+  onDelete,
   onRefresh,
 }: {
   tokens: AgentToken[];
@@ -34,6 +35,7 @@ export function AgentTokenManager({
   createdToken: CreatedAgentToken | null;
   onCreate: (name: string, ttlHours: number) => Promise<void>;
   onRevoke: (id: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
   const [name, setName] = useState('agent');
@@ -42,6 +44,7 @@ export function AgentTokenManager({
   const [copyTokenState, setCopyTokenState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [copyCommandState, setCopyCommandState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [pendingRevokeId, setPendingRevokeId] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const registerCommand = createdToken
     ? `vibe-agent register --server ${window.location.origin} --token ${createdToken.token}`
     : '';
@@ -81,6 +84,15 @@ export function AgentTokenManager({
     }
   }
 
+  async function handleDelete(id: string) {
+    try {
+      await onDelete(id);
+      setPendingDeleteId(null);
+    } catch {
+      return;
+    }
+  }
+
   async function copyToken() {
     if (!createdToken) return;
     try {
@@ -113,15 +125,17 @@ export function AgentTokenManager({
         </button>
       </header>
 
-      <section className="tokenPanel" aria-labelledby="create-token-title">
-        <h2 id="create-token-title">Create token</h2>
+      <section className="tokenPanel createTokenPanel" aria-labelledby="create-token-title">
+        <div className="panelTitleRow">
+          <h2 id="create-token-title">Create token</h2>
+        </div>
         <form className="tokenForm" onSubmit={handleCreate}>
           <label>
-            Name
-            <input value={name} onChange={(event) => setName(event.target.value)} />
+            <span>Token name</span>
+            <input value={name} placeholder="office-mac" onChange={(event) => setName(event.target.value)} />
           </label>
           <label>
-            TTL hours
+            <span>TTL hours</span>
             <input
               type="number"
               min={1}
@@ -130,41 +144,51 @@ export function AgentTokenManager({
               onChange={(event) => setTtlHours(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={submitting}>
+          <button type="submit" className="primaryButton tokenSubmitButton" disabled={submitting}>
             <KeyRound size={16} aria-hidden="true" />
             Create
           </button>
         </form>
         {createdToken && (
           <div className="newToken" role="status">
-            <div className="newTokenItem">
-              <span>Token</span>
-              <code>{createdToken.token}</code>
-              <button type="button" className="iconTextButton" onClick={copyToken}>
-                {copyTokenState === 'copied' ? (
-                  <Check size={16} aria-hidden="true" />
-                ) : (
-                  <Clipboard size={16} aria-hidden="true" />
-                )}
-                {copyTokenState === 'copied' ? 'Copied' : 'Copy token'}
-              </button>
-              {copyTokenState === 'failed' && <span className="error">Copy failed</span>}
+            <div className="newTokenSummary">
+              <span>Token name</span>
+              <strong>{createdToken.name}</strong>
             </div>
-            <div className="newTokenItem">
-              <span>Agent command</span>
-              <pre className="agentCommand">
-                <code>{registerCommand}</code>
-                <code>{runCommand}</code>
-              </pre>
-              <button type="button" className="iconTextButton" onClick={copyAgentCommand}>
-                {copyCommandState === 'copied' ? (
-                  <Check size={16} aria-hidden="true" />
-                ) : (
-                  <Clipboard size={16} aria-hidden="true" />
-                )}
-                {copyCommandState === 'copied' ? 'Copied' : 'Copy command'}
-              </button>
-              {copyCommandState === 'failed' && <span className="error">Copy failed</span>}
+            <div className="newTokenGrid">
+              <div className="newTokenBlock">
+                <div className="newTokenBlockHeader">
+                  <span>Token</span>
+                  <button type="button" className="iconTextButton" onClick={copyToken}>
+                    {copyTokenState === 'copied' ? (
+                      <Check size={16} aria-hidden="true" />
+                    ) : (
+                      <Clipboard size={16} aria-hidden="true" />
+                    )}
+                    {copyTokenState === 'copied' ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <code className="tokenValue">{createdToken.token}</code>
+                {copyTokenState === 'failed' && <span className="error">Copy failed</span>}
+              </div>
+              <div className="newTokenBlock">
+                <div className="newTokenBlockHeader">
+                  <span>Agent command</span>
+                  <button type="button" className="iconTextButton" onClick={copyAgentCommand}>
+                    {copyCommandState === 'copied' ? (
+                      <Check size={16} aria-hidden="true" />
+                    ) : (
+                      <Clipboard size={16} aria-hidden="true" />
+                    )}
+                    {copyCommandState === 'copied' ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <pre className="agentCommand">
+                  <code>{registerCommand}</code>
+                  <code>{runCommand}</code>
+                </pre>
+                {copyCommandState === 'failed' && <span className="error">Copy failed</span>}
+              </div>
             </div>
           </div>
         )}
@@ -196,6 +220,7 @@ export function AgentTokenManager({
                 {sortedTokens.map((token) => {
                   const status = getTokenStatus(token);
                   const confirming = pendingRevokeId === token.id;
+                  const confirmingDelete = pendingDeleteId === token.id;
                   return (
                     <tr key={token.id}>
                       <td>
@@ -210,8 +235,16 @@ export function AgentTokenManager({
                       <td>{formatDate(token.used_at)}</td>
                       <td>{formatDate(token.revoked_at)}</td>
                       <td>
-                        {status === 'revoked' ? (
-                          <span className="muted">Revoked</span>
+                        {status === 'revoked' && confirmingDelete ? (
+                          <button type="button" className="dangerButton" onClick={() => handleDelete(token.id)}>
+                            <Trash2 size={16} aria-hidden="true" />
+                            Confirm delete
+                          </button>
+                        ) : status === 'revoked' ? (
+                          <button type="button" className="iconTextButton" onClick={() => setPendingDeleteId(token.id)}>
+                            <Trash2 size={16} aria-hidden="true" />
+                            Delete
+                          </button>
                         ) : confirming ? (
                           <button type="button" className="dangerButton" onClick={() => handleRevoke(token.id)}>
                             <ShieldX size={16} aria-hidden="true" />

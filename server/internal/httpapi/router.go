@@ -224,6 +224,10 @@ func (r *router) handleRevokeAgentToken(w http.ResponseWriter, req *http.Request
 		return
 	}
 	id := strings.TrimPrefix(req.URL.Path, "/api/agent-tokens/")
+	if strings.HasSuffix(id, "/permanent") {
+		r.handleDeleteRevokedAgentToken(w, req, user, strings.TrimSuffix(id, "/permanent"))
+		return
+	}
 	if id == "" || strings.Contains(id, "/") {
 		writeError(w, http.StatusNotFound, "not_found", "agent token not found")
 		return
@@ -243,6 +247,32 @@ func (r *router) handleRevokeAgentToken(w http.ResponseWriter, req *http.Request
 		Summary:   "agent registration token revoked",
 	})
 	writeJSON(w, http.StatusOK, agentTokenToResponse(token))
+}
+
+func (r *router) handleDeleteRevokedAgentToken(w http.ResponseWriter, req *http.Request, user store.User, id string) {
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "not_found", "agent token not found")
+		return
+	}
+	err := r.store.DeleteRevokedAgentToken(req.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "agent token not found")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "token_active", "agent token must be revoked before permanent deletion")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token_error", "failed to delete token")
+		return
+	}
+	_ = r.audit.Log(req.Context(), store.AuditEvent{
+		UserID:    user.ID,
+		EventType: "agent_token_deleted",
+		Summary:   "agent registration token permanently deleted",
+	})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (r *router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {

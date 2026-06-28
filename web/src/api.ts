@@ -41,6 +41,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     throw new Error(`${res.status} ${await res.text()}`);
   }
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return res.json() as Promise<T>;
 }
 
@@ -68,6 +71,12 @@ export function createAgentToken(name: string, ttlHours: number): Promise<Create
 
 export function revokeAgentToken(id: string): Promise<AgentToken> {
   return request<AgentToken>(`/api/agent-tokens/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export function deleteAgentToken(id: string): Promise<void> {
+  return request<void>(`/api/agent-tokens/${id}/permanent`, {
     method: 'DELETE',
   });
 }

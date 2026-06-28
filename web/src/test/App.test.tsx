@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView } from '../App';
@@ -8,6 +8,7 @@ vi.mock('../api', () => ({
   closeSession: vi.fn(),
   createAgentToken: vi.fn(),
   createSession: vi.fn(),
+  deleteAgentToken: vi.fn(),
   listDevices: vi.fn(),
   listAgentTokens: vi.fn(),
   listSessionOutput: vi.fn(),
@@ -231,6 +232,7 @@ describe('AppView', () => {
   it('creates and revokes agent tokens from the management view', async () => {
     const createToken = vi.fn().mockResolvedValue(undefined);
     const revokeToken = vi.fn().mockResolvedValue(undefined);
+    const deleteToken = vi.fn().mockResolvedValue(undefined);
     render(
       <AppView
         user={{ id: 'user-1', username: 'admin' }}
@@ -259,6 +261,7 @@ describe('AppView', () => {
         onRenameSession={vi.fn()}
         onCreateAgentToken={createToken}
         onRevokeAgentToken={revokeToken}
+        onDeleteAgentToken={deleteToken}
         onRefreshAgentTokens={vi.fn().mockResolvedValue(undefined)}
       />
     );
@@ -271,6 +274,9 @@ describe('AppView', () => {
     await userEvent.click(screen.getByRole('button', { name: /create/i }));
 
     expect(createToken).toHaveBeenCalledWith('rack', 12);
+    const createdTokenPanel = screen.getByRole('status');
+    expect(within(createdTokenPanel).getByText('Token name')).toBeInTheDocument();
+    expect(within(createdTokenPanel).getByText('desk')).toBeInTheDocument();
     expect(screen.getByText('raw-token-once')).toBeInTheDocument();
     expect(
       screen.getByText(`vibe-agent register --server ${window.location.origin} --token raw-token-once`)
@@ -281,5 +287,42 @@ describe('AppView', () => {
     expect(revokeToken).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: /confirm/i }));
     expect(revokeToken).toHaveBeenCalledWith('tok-1');
+  });
+
+  it('permanently deletes revoked agent tokens after confirmation', async () => {
+    const deleteToken = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[]}
+        sessions={{}}
+        agentTokens={[
+          {
+            id: 'tok-revoked',
+            name: 'old-token',
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+            revoked_at: new Date().toISOString(),
+          },
+        ]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onDeleteAgentToken={deleteToken}
+        onRefreshAgentTokens={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /agent tokens/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }));
+    expect(deleteToken).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: /confirm delete/i }));
+    expect(deleteToken).toHaveBeenCalledWith('tok-revoked');
   });
 });

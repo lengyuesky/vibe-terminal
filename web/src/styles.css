@@ -66,6 +66,11 @@ input {
   padding: 0 12px;
 }
 
+.primaryButton {
+  border-color: #2f9d64;
+  background: #2f6f4b;
+}
+
 .deviceRow button,
 .sideNav button,
 .tokenForm button,
@@ -332,10 +337,14 @@ input {
   background: #181b20;
 }
 
+.createTokenPanel {
+  gap: 16px;
+}
+
 .tokenForm {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 180px) auto;
-  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) minmax(120px, 160px) minmax(132px, auto);
+  gap: 14px;
   align-items: end;
 }
 
@@ -346,6 +355,7 @@ input {
 }
 
 .tokenForm input {
+  width: 100%;
   min-height: 38px;
   border-radius: 6px;
   border: 1px solid #3d444f;
@@ -354,38 +364,87 @@ input {
   padding: 0 10px;
 }
 
+.tokenSubmitButton {
+  min-width: 132px;
+  white-space: nowrap;
+}
+
 .newToken {
   display: grid;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #2f9d64;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid rgba(47, 157, 100, 0.72);
   border-radius: 8px;
-  background: rgba(47, 157, 100, 0.12);
+  background: linear-gradient(180deg, rgba(47, 157, 100, 0.14), rgba(47, 157, 100, 0.08));
 }
 
-.newTokenItem {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr) auto auto;
+.newTokenSummary {
+  display: flex;
   gap: 10px;
   align-items: center;
+  min-width: 0;
 }
 
-.newTokenItem > span:first-child {
+.newTokenSummary span,
+.newTokenBlockHeader span {
   color: #b9c0cc;
   font-weight: 600;
 }
 
-.newToken code,
+.newTokenSummary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #f4f5f7;
+}
+
+.newTokenGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
+.newTokenBlock {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(61, 68, 79, 0.8);
+  border-radius: 8px;
+  background: rgba(15, 17, 21, 0.78);
+}
+
+.newTokenBlockHeader {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.newTokenBlockHeader .iconTextButton {
+  flex: 0 0 auto;
+}
+
+.tokenValue,
 .agentCommand {
   min-width: 0;
   overflow-wrap: anywhere;
   color: #d6ffe5;
 }
 
+.tokenValue {
+  padding: 10px;
+  border-radius: 6px;
+  background: #0b0d10;
+}
+
 .agentCommand {
   display: grid;
   gap: 4px;
   margin: 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #0b0d10;
   white-space: pre-wrap;
 }
 
@@ -468,8 +527,12 @@ input {
   }
 
   .tokenForm,
-  .newTokenItem {
+  .newTokenGrid {
     grid-template-columns: 1fr;
+  }
+
+  .tokenSubmitButton {
+    width: 100%;
   }
 }
 

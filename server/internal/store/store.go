@@ -288,6 +288,32 @@ func (db *DB) RevokeAgentToken(ctx context.Context, id string, revokedAt time.Ti
 	return token, nil
 }
 
+func (db *DB) DeleteRevokedAgentToken(ctx context.Context, id string) error {
+	var revokedAt sql.NullTime
+	err := db.SQL.QueryRowContext(ctx, `select revoked_at from agent_tokens where id = ?`, id).Scan(&revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !revokedAt.Valid {
+		return ErrConflict
+	}
+	result, err := db.SQL.ExecContext(ctx, `delete from agent_tokens where id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) UseAgentTokenByHash(ctx context.Context, tokenHash string, usedAt time.Time) (AgentToken, error) {
 	tx, err := db.SQL.BeginTx(ctx, nil)
 	if err != nil {

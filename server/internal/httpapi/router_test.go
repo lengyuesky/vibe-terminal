@@ -141,6 +141,16 @@ func TestAgentTokenRevokeFlow(t *testing.T) {
 		t.Fatalf("decode create response: %v", err)
 	}
 
+	deleteActiveReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/"+created["id"]+"/permanent", nil)
+	for _, cookie := range cookies {
+		deleteActiveReq.AddCookie(cookie)
+	}
+	deleteActiveRR := httptest.NewRecorder()
+	handler.ServeHTTP(deleteActiveRR, deleteActiveReq)
+	if deleteActiveRR.Code != http.StatusConflict {
+		t.Fatalf("delete active token status = %d body=%s", deleteActiveRR.Code, deleteActiveRR.Body.String())
+	}
+
 	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/"+created["id"], nil)
 	for _, cookie := range cookies {
 		revokeReq.AddCookie(cookie)
@@ -159,6 +169,35 @@ func TestAgentTokenRevokeFlow(t *testing.T) {
 	}
 	if revoked["token"] != "" {
 		t.Fatalf("revoke response must not include raw token: %#v", revoked)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/"+created["id"]+"/permanent", nil)
+	for _, cookie := range cookies {
+		deleteReq.AddCookie(cookie)
+	}
+	deleteRR := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRR, deleteReq)
+	if deleteRR.Code != http.StatusNoContent {
+		t.Fatalf("delete revoked token status = %d body=%s", deleteRR.Code, deleteRR.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/agent-tokens", nil)
+	for _, cookie := range cookies {
+		listReq.AddCookie(cookie)
+	}
+	listRR := httptest.NewRecorder()
+	handler.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", listRR.Code, listRR.Body.String())
+	}
+	var listed []map[string]string
+	if err := json.Unmarshal(listRR.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	for _, token := range listed {
+		if token["id"] == created["id"] {
+			t.Fatalf("deleted token still listed: %#v", listed)
+		}
 	}
 
 	registerReq := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(`{"token":"`+created["token"]+`","name":"desk","platform":"linux","agent_version":"0.1.0","fingerprint":"fp-revoked"}`))

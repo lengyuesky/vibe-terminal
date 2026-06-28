@@ -108,6 +108,18 @@ export function App() {
     }
   }
 
+  async function handleDeleteAgentToken(id: string) {
+    setTokenError(null);
+    try {
+      await api.deleteAgentToken(id);
+      setAgentTokens((current) => current.filter((token) => token.id !== id));
+      setCreatedAgentToken((current) => (current?.id === id ? null : current));
+    } catch (error) {
+      setTokenError('Failed to delete agent token.');
+      throw error;
+    }
+  }
+
   return (
     <AppView
       user={user}
@@ -123,6 +135,7 @@ export function App() {
       tokenError={tokenError}
       onCreateAgentToken={handleCreateAgentToken}
       onRevokeAgentToken={handleRevokeAgentToken}
+      onDeleteAgentToken={handleDeleteAgentToken}
       onRefreshAgentTokens={loadAgentTokens}
     />
   );
@@ -142,6 +155,7 @@ export function AppView({
   tokenError,
   onCreateAgentToken,
   onRevokeAgentToken,
+  onDeleteAgentToken = async () => {},
   onRefreshAgentTokens,
 }: {
   user: User | null;
@@ -157,6 +171,7 @@ export function AppView({
   tokenError: string | null;
   onCreateAgentToken: (name: string, ttlHours: number) => Promise<void>;
   onRevokeAgentToken: (id: string) => Promise<void>;
+  onDeleteAgentToken?: (id: string) => Promise<void>;
   onRefreshAgentTokens: () => Promise<void>;
 }) {
   const initialSessions = useMemo(() => Object.values(sessions).flat(), [sessions]);
@@ -205,6 +220,7 @@ export function AppView({
           createdToken={createdAgentToken}
           onCreate={onCreateAgentToken}
           onRevoke={onRevokeAgentToken}
+          onDelete={onDeleteAgentToken}
           onRefresh={onRefreshAgentTokens}
         />
       )}

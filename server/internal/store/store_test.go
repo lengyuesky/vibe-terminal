@@ -114,6 +114,46 @@ func TestRevokeAgentToken(t *testing.T) {
 	}
 }
 
+func TestDeleteRevokedAgentToken(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	_, err = db.CreateAgentToken(ctx, CreateAgentTokenParams{
+		ID:        "tok-delete",
+		Name:      "cleanup",
+		TokenHash: "hash-delete",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := db.DeleteRevokedAgentToken(ctx, "tok-delete"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("delete active token error = %v, want ErrConflict", err)
+	}
+	if _, err := db.RevokeAgentToken(ctx, "tok-delete", time.Now().UTC()); err != nil {
+		t.Fatalf("revoke token: %v", err)
+	}
+	if err := db.DeleteRevokedAgentToken(ctx, "tok-delete"); err != nil {
+		t.Fatalf("delete revoked token: %v", err)
+	}
+	tokens, err := db.ListAgentTokens(ctx)
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("tokens after delete = %#v, want empty", tokens)
+	}
+	if err := db.DeleteRevokedAgentToken(ctx, "tok-delete"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing token error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDeviceSessionAndOutputRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, ":memory:")

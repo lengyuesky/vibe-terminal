@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
@@ -7,9 +7,11 @@ import { encodeResize, encodeStdin, encodeSubscribe, webSocketURL, type Terminal
 
 export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readOnly: boolean }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!ref.current) return;
+    setConnectionMessage(null);
     let socket: WebSocket | null = null;
     let terminal: Terminal | null = null;
     let resizeObserver: ResizeObserver | null = null;
@@ -89,6 +91,10 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
         });
         socket.addEventListener('message', (event) => {
           const message = JSON.parse(event.data) as TerminalEvent;
+          if (message.type === 'error') {
+            setConnectionMessage(message.payload.message);
+            return;
+          }
           if (message.type === 'stdout' && message.session_id === sessionId) {
             if (restoring) {
               pendingStdout.push({ seq: message.payload.seq, data: message.payload.data });
@@ -108,6 +114,12 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
             socket.send(encodeStdin(sessionId, data));
           }
         });
+        socket.addEventListener('close', () => {
+          setConnectionMessage('Terminal connection closed.');
+        });
+        socket.addEventListener('error', () => {
+          setConnectionMessage('Terminal connection error.');
+        });
       }
     } catch {
       ref.current.textContent = `connected to ${sessionId}`;
@@ -121,5 +133,14 @@ export function TerminalPane({ sessionId, readOnly }: { sessionId: string; readO
     };
   }, [sessionId, readOnly]);
 
-  return <div className="terminalPane" ref={ref} />;
+  return (
+    <div className="terminalPaneShell">
+      {connectionMessage && (
+        <div className="terminalStatus" role="status">
+          {connectionMessage}
+        </div>
+      )}
+      <div className="terminalPane" ref={ref} />
+    </div>
+  );
 }

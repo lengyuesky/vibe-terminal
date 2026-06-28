@@ -13,7 +13,6 @@ services:
     volumes:
       - vibe-data:/data
       - vibe-workspace-data:/workspace-data
-      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8080:8080"
     restart: unless-stopped

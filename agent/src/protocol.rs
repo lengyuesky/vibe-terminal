@@ -35,6 +35,13 @@ pub struct Stdin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Resize {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Stdout {
     pub session_id: String,
     pub seq: i64,

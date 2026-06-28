@@ -5,9 +5,9 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.22 AS build
+FROM golang:1.26.4 AS build
 WORKDIR /src
-COPY server/go.mod ./server/
+COPY server/go.mod server/go.sum ./server/
 WORKDIR /src/server
 RUN go mod download
 COPY server/ ./

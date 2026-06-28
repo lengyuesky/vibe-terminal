@@ -485,6 +485,26 @@ input {
   padding: 0 10px;
 }
 
+.terminalPaneShell {
+  position: relative;
+  min-height: 0;
+}
+
+.terminalStatus {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  max-width: min(420px, calc(100% - 24px));
+  padding: 8px 10px;
+  border: 1px solid #c95b44;
+  border-radius: 6px;
+  background: rgba(24, 27, 32, 0.94);
+  color: #ff9b73;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .terminalPane {
   min-height: 0;
   padding: 8px;

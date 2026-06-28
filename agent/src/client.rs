@@ -10,7 +10,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::buffer::OutputBuffer;
 use crate::config::AgentConfig;
 use crate::protocol::{
-    CloseSession, Envelope, SessionExit, SessionStarted, StartSession, Stdin, Stdout,
+    CloseSession, Envelope, Resize, SessionExit, SessionStarted, StartSession, Stdin, Stdout,
     PROTOCOL_VERSION,
 };
 use crate::pty_manager::{PtyManager, StartRequest};
@@ -55,7 +55,11 @@ struct RegisterResponse {
     credential: String,
 }
 
-pub async fn register_agent(server_url: &str, token: &str, device_name: &str) -> Result<AgentConfig> {
+pub async fn register_agent(
+    server_url: &str,
+    token: &str,
+    device_name: &str,
+) -> Result<AgentConfig> {
     let request = RegisterRequest {
         token: token.to_string(),
         name: device_name.to_string(),
@@ -73,7 +77,10 @@ pub async fn register_agent(server_url: &str, token: &str, device_name: &str) ->
     if !response.status().is_success() {
         anyhow::bail!("registration failed with status {}", response.status());
     }
-    let body: RegisterResponse = response.json().await.context("decode registration response")?;
+    let body: RegisterResponse = response
+        .json()
+        .await
+        .context("decode registration response")?;
     Ok(AgentConfig {
         server_url: server_url.to_string(),
         device_id: body.device_id,
@@ -88,7 +95,9 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
         config: config.clone(),
         registry: registry.clone(),
     };
-    let (socket, _) = connect_async(ws_url).await.context("connect agent websocket")?;
+    let (socket, _) = connect_async(ws_url)
+        .await
+        .context("connect agent websocket")?;
     let (mut write, mut read) = socket.split();
     write
         .send(Message::Text(state.agent_hello_json()?))
@@ -149,6 +158,10 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                         let payload: Stdin = serde_json::from_value(envelope.payload)?;
                         write_stdin_if_session_exists(&mut pty, &buffers, &payload)?;
                     }
+                    "resize" => {
+                        let payload: Resize = serde_json::from_value(envelope.payload)?;
+                        resize_if_session_exists(&mut pty, &buffers, &payload)?;
+                    }
                     "close_session" => {
                         let payload: CloseSession = serde_json::from_value(envelope.payload)?;
                         let session_id = payload.session_id.clone();
@@ -183,6 +196,20 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     )
                     .await?;
                 }
+                for session_id in pty.drain_exited() {
+                    buffers.remove(&session_id);
+                    send_payload(
+                        &mut write,
+                        "session_exit",
+                        Some(&session_id),
+                        SessionExit {
+                            session_id: session_id.clone(),
+                            exit_code: 0,
+                            message: "exited".to_string(),
+                        },
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -199,6 +226,17 @@ fn write_stdin_if_session_exists(
     pty.write(&payload.session_id, &payload.data)
 }
 
+fn resize_if_session_exists(
+    pty: &mut PtyManager,
+    buffers: &BTreeMap<String, OutputBuffer>,
+    payload: &Resize,
+) -> Result<()> {
+    if !buffers.contains_key(&payload.session_id) {
+        return Ok(());
+    }
+    pty.resize(&payload.session_id, payload.cols, payload.rows)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct SessionOutputFrame {
     session_id: String,
@@ -212,6 +250,9 @@ fn flush_pty_outputs(
 ) -> Result<Vec<SessionOutputFrame>> {
     let mut frames = Vec::new();
     for session_id in buffers.keys().cloned().collect::<Vec<_>>() {
+        if !pty.has_session(&session_id) {
+            continue;
+        }
         let output = pty.read_available(&session_id)?;
         if output.is_empty() {
             continue;
@@ -230,7 +271,12 @@ fn flush_pty_outputs(
 }
 
 fn device_fingerprint(device_name: &str) -> String {
-    format!("{}:{}:{}", std::env::consts::OS, std::env::consts::ARCH, device_name)
+    format!(
+        "{}:{}:{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        device_name
+    )
 }
 
 fn agent_ws_url(server_url: &str) -> String {
@@ -244,7 +290,12 @@ fn agent_ws_url(server_url: &str) -> String {
     format!("{base}/ws/agent")
 }
 
-async fn send_payload<S, T>(write: &mut S, message_type: &str, session_id: Option<&str>, payload: T) -> Result<()>
+async fn send_payload<S, T>(
+    write: &mut S,
+    message_type: &str,
+    session_id: Option<&str>,
+    payload: T,
+) -> Result<()>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
@@ -271,8 +322,14 @@ mod tests {
 
     #[test]
     fn agent_ws_url_uses_websocket_scheme() {
-        assert_eq!(agent_ws_url("https://terminal.example.com"), "wss://terminal.example.com/ws/agent");
-        assert_eq!(agent_ws_url("http://localhost:8080/"), "ws://localhost:8080/ws/agent");
+        assert_eq!(
+            agent_ws_url("https://terminal.example.com"),
+            "wss://terminal.example.com/ws/agent"
+        );
+        assert_eq!(
+            agent_ws_url("http://localhost:8080/"),
+            "ws://localhost:8080/ws/agent"
+        );
     }
 
     #[test]
@@ -311,6 +368,21 @@ mod tests {
             data: "pwd\n".into(),
         };
 
-        write_stdin_if_session_exists(&mut pty, &buffers, &payload).expect("unknown stdin should be ignored");
+        write_stdin_if_session_exists(&mut pty, &buffers, &payload)
+            .expect("unknown stdin should be ignored");
+    }
+
+    #[test]
+    fn resize_for_unknown_session_does_not_disconnect_agent() {
+        let mut pty = PtyManager::new();
+        let buffers = BTreeMap::new();
+        let payload = Resize {
+            session_id: "missing".into(),
+            cols: 120,
+            rows: 40,
+        };
+
+        resize_if_session_exists(&mut pty, &buffers, &payload)
+            .expect("unknown resize should be ignored");
     }
 }

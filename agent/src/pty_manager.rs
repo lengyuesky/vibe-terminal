@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::collections::BTreeMap;
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -21,20 +21,22 @@ pub struct StartedSession {
 }
 
 struct ManagedSession {
+    master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send>,
 }
 
-struct PtyOutput {
-    session_id: String,
-    data: String,
+enum PtyEvent {
+    Output { session_id: String, data: String },
+    Exited { session_id: String },
 }
 
 pub struct PtyManager {
     sessions: BTreeMap<String, ManagedSession>,
-    output_tx: mpsc::Sender<PtyOutput>,
-    output_rx: mpsc::Receiver<PtyOutput>,
+    output_tx: mpsc::Sender<PtyEvent>,
+    output_rx: mpsc::Receiver<PtyEvent>,
     pending_output: BTreeMap<String, Vec<String>>,
+    exited_sessions: BTreeSet<String>,
 }
 
 impl PtyManager {
@@ -45,6 +47,7 @@ impl PtyManager {
             output_tx,
             output_rx,
             pending_output: BTreeMap::new(),
+            exited_sessions: BTreeSet::new(),
         }
     }
 
@@ -76,7 +79,7 @@ impl PtyManager {
                     Ok(n) => {
                         let data = String::from_utf8_lossy(&buf[..n]).to_string();
                         if output_tx
-                            .send(PtyOutput {
+                            .send(PtyEvent::Output {
                                 session_id: session_id.clone(),
                                 data,
                             })
@@ -88,10 +91,12 @@ impl PtyManager {
                     Err(_) => break,
                 }
             }
+            let _ = output_tx.send(PtyEvent::Exited { session_id });
         });
         self.sessions.insert(
             req.session_id.clone(),
             ManagedSession {
+                master: pair.master,
                 writer,
                 child,
             },
@@ -107,7 +112,30 @@ impl PtyManager {
             .sessions
             .get_mut(session_id)
             .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
-        session.writer.write_all(data.as_bytes()).context("write pty")
+        session
+            .writer
+            .write_all(data.as_bytes())
+            .context("write pty")
+    }
+
+    pub fn resize(&mut self, session_id: &str, cols: u16, rows: u16) -> Result<()> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+        session
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("resize pty")
+    }
+
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.sessions.contains_key(session_id)
     }
 
     pub fn read_available(&mut self, session_id: &str) -> Result<String> {
@@ -119,17 +147,50 @@ impl PtyManager {
             .remove(session_id)
             .unwrap_or_default()
             .join("");
-        while let Ok(frame) = self.output_rx.try_recv() {
-            if frame.session_id == session_id {
-                output.push_str(&frame.data);
-            } else {
-                self.pending_output
-                    .entry(frame.session_id)
-                    .or_default()
-                    .push(frame.data);
+        while let Ok(event) = self.output_rx.try_recv() {
+            match event {
+                PtyEvent::Output {
+                    session_id: event_session_id,
+                    data,
+                } => {
+                    if event_session_id == session_id {
+                        output.push_str(&data);
+                    } else {
+                        self.pending_output
+                            .entry(event_session_id)
+                            .or_default()
+                            .push(data);
+                    }
+                }
+                PtyEvent::Exited { session_id } => {
+                    if self.sessions.remove(&session_id).is_some() {
+                        self.exited_sessions.insert(session_id);
+                    }
+                }
             }
         }
         Ok(output)
+    }
+
+    pub fn drain_exited(&mut self) -> Vec<String> {
+        while let Ok(event) = self.output_rx.try_recv() {
+            match event {
+                PtyEvent::Output { session_id, data } => {
+                    self.pending_output
+                        .entry(session_id)
+                        .or_default()
+                        .push(data);
+                }
+                PtyEvent::Exited { session_id } => {
+                    if self.sessions.remove(&session_id).is_some() {
+                        self.exited_sessions.insert(session_id);
+                    }
+                }
+            }
+        }
+        std::mem::take(&mut self.exited_sessions)
+            .into_iter()
+            .collect()
     }
 
     pub fn close(&mut self, session_id: &str) -> Result<()> {

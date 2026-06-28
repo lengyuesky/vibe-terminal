@@ -505,6 +505,7 @@ func (r *router) handleAgentWebSocket(w http.ResponseWriter, req *http.Request) 
 	r.hub.AttachAgent(device.ID, peer)
 	r.syncAgentSessions(ctx, device.ID, hello.Sessions)
 	defer func() {
+		r.markDisconnectedSessionsLost(context.Background(), device.ID)
 		r.presence.Set(device.ID, false)
 		r.hub.DetachAgent(device.ID)
 	}()
@@ -726,6 +727,19 @@ func (r *router) syncAgentSessions(ctx context.Context, deviceID string, session
 		if _, ok := seen[session.ID]; ok {
 			continue
 		}
+		if session.Status != store.SessionRunning && session.Status != store.SessionStarting {
+			continue
+		}
+		_ = r.store.UpdateTerminalSessionStatus(ctx, session.ID, store.SessionLost, session.AgentPID, session.LastOutputSeq)
+	}
+}
+
+func (r *router) markDisconnectedSessionsLost(ctx context.Context, deviceID string) {
+	sessions, err := r.store.ListTerminalSessionsForDevice(ctx, deviceID)
+	if err != nil {
+		return
+	}
+	for _, session := range sessions {
 		if session.Status != store.SessionRunning && session.Status != store.SessionStarting {
 			continue
 		}

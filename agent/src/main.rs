@@ -31,7 +31,11 @@ async fn main() -> Result<()> {
             let config = register_agent(&server, &token, &device_name).await?;
             let path = config::default_config_path()?;
             config::save(&path, &config)?;
-            println!("registered device {} at {}", config.device_id, path.display());
+            println!(
+                "registered device {} at {}",
+                config.device_id,
+                path.display()
+            );
         }
         Command::Run => {
             let path = config::default_config_path()?;

@@ -453,3 +453,47 @@ func TestSyncAgentSessionsMarksMissingRunningSessionsLost(t *testing.T) {
 		t.Fatalf("closed status = %q, want closed", closed.Status)
 	}
 }
+
+func TestAgentDisconnectMarksRunningSessionsLost(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.NewStore(t)
+	_, err := db.CreateDevice(ctx, store.Device{
+		ID: "dev-1", Name: "box", Platform: "linux", AgentVersion: "0.1.0",
+		Fingerprint: "fp", CredentialHash: "hash", Authorized: true,
+	})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	for _, session := range []store.TerminalSession{
+		{ID: "running", DeviceID: "dev-1", Title: "shell", ShellPath: "/bin/bash", WorkingDirectory: "/tmp", Status: store.SessionRunning, AgentPID: 100, LastOutputSeq: 7},
+		{ID: "starting", DeviceID: "dev-1", Title: "shell", ShellPath: "/bin/bash", WorkingDirectory: "/tmp", Status: store.SessionStarting, AgentPID: 0, LastOutputSeq: 0},
+		{ID: "exited", DeviceID: "dev-1", Title: "shell", ShellPath: "/bin/bash", WorkingDirectory: "/tmp", Status: store.SessionExited, AgentPID: 101, LastOutputSeq: 8},
+	} {
+		if _, err := db.CreateTerminalSession(ctx, session); err != nil {
+			t.Fatalf("create session %s: %v", session.ID, err)
+		}
+	}
+	r := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+	}).(*router)
+
+	r.markDisconnectedSessionsLost(ctx, "dev-1")
+
+	for _, id := range []string{"running", "starting"} {
+		session, err := db.GetTerminalSession(ctx, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if session.Status != store.SessionLost {
+			t.Fatalf("%s status = %q, want lost", id, session.Status)
+		}
+	}
+	exited, err := db.GetTerminalSession(ctx, "exited")
+	if err != nil {
+		t.Fatalf("get exited: %v", err)
+	}
+	if exited.Status != store.SessionExited {
+		t.Fatalf("exited status = %q, want exited", exited.Status)
+	}
+}

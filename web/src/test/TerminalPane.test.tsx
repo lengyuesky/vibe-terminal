@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { TerminalPane } from '../components/TerminalPane';
@@ -34,7 +34,7 @@ vi.mock('../api', () => ({
 }));
 
 vi.mock('xterm', () => ({
-  Terminal: vi.fn().mockImplementation(() => {
+  Terminal: vi.fn().mockImplementation(function () {
     const dataHandlers: Array<(data: string) => void> = [];
     const terminal = {
       cols: 80,
@@ -61,7 +61,9 @@ vi.mock('xterm', () => ({
 }));
 
 vi.mock('xterm-addon-fit', () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
+  FitAddon: vi.fn().mockImplementation(function () {
+    return { fit: vi.fn() };
+  }),
 }));
 
 const mockedApi = vi.mocked(api);
@@ -191,5 +193,21 @@ describe('TerminalPane', () => {
     await waitFor(() => expect(webSocketState.instances[0].send).toHaveBeenCalled());
     const sentMessages = webSocketState.instances[0].send.mock.calls.map(([message]) => String(message));
     expect(sentMessages.some((message) => message.includes('"type":"resize"') && message.includes('"session_id":"sess-1"'))).toBe(true);
+  });
+
+  it('shows websocket error messages in the terminal pane', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+
+    render(<TerminalPane sessionId="sess-1" readOnly={false} />);
+
+    await waitFor(() => expect(webSocketState.instances.length).toBe(1));
+    webSocketState.instances[0].emit('message', {
+      data: JSON.stringify({
+        type: 'error',
+        payload: { code: 'agent_unavailable', message: 'agent disconnected' },
+      }),
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent('agent disconnected');
   });
 });

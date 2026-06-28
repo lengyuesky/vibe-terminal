@@ -4,13 +4,14 @@ services:
       context: .
       dockerfile: server/Dockerfile
     environment:
-      VIBE_ADDR: ":8080"
-      VIBE_DB: "/data/vibe-terminal.db"
-      VIBE_OUTPUT_ROOT: "/workspace-data"
-      VIBE_SESSION_SECRET: "${VIBE_SESSION_SECRET}"
-      VIBE_ADMIN_USER: "${VIBE_ADMIN_USER}"
-      VIBE_ADMIN_PASSWORD: "${VIBE_ADMIN_PASSWORD}"
+      VIBE_CONFIG: "/app/config.yaml"
     volumes:
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
       - vibe-data:/data
       - vibe-workspace-data:/workspace-data
     ports:

@@ -1,0 +1,7 @@
+addr: ":8080"
+database_path: "/data/vibe-terminal.db"
+output_root: "/workspace-data"
+web_dir: "/app/web"
+session_secret: "replace-with-a-random-32-byte-secret"
+admin_username: "admin"
+admin_password: "replace-with-a-long-password"

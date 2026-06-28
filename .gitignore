@@ -9,6 +9,7 @@ target/
 .env
 .env.*
 !.env.example
+config.yaml
 .claude/
 server/server
 agent/vibe-agent

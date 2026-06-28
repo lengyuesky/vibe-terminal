@@ -17,6 +17,5 @@ FROM gcr.io/distroless/static-debian12
 WORKDIR /app
 COPY --from=build /out/vibe-server /app/vibe-server
 COPY --from=web /src/web/dist /app/web
-ENV VIBE_WEB_DIR=/app/web
 EXPOSE 8080
 ENTRYPOINT ["/app/vibe-server"]

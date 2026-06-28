@@ -1,8 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -17,26 +21,103 @@ type Config struct {
 }
 
 func FromEnv() Config {
-	addr := getenv("VIBE_ADDR", ":8080")
-	dbPath := getenv("VIBE_DB", "data/vibe-terminal.db")
-	outputRoot := getenv("VIBE_OUTPUT_ROOT", "workspace-data")
-	webDir := getenv("VIBE_WEB_DIR", "web/dist")
-	secret := []byte(getenv("VIBE_SESSION_SECRET", "dev-session-secret-32-bytes-long"))
+	cfg := defaultConfig()
+	applyEnv(&cfg)
+	return cfg
+}
+
+func Load() (Config, error) {
+	cfg := defaultConfig()
+	if path := os.Getenv("VIBE_CONFIG"); path != "" {
+		fileConfig, err := loadFile(path)
+		if err != nil {
+			return Config{}, err
+		}
+		applyFile(&cfg, fileConfig)
+	}
+	applyEnv(&cfg)
+	return cfg, nil
+}
+
+type fileConfig struct {
+	Addr          string `yaml:"addr"`
+	DatabasePath  string `yaml:"database_path"`
+	OutputRoot    string `yaml:"output_root"`
+	WebDir        string `yaml:"web_dir"`
+	SessionSecret string `yaml:"session_secret"`
+	AdminUsername string `yaml:"admin_username"`
+	AdminPassword string `yaml:"admin_password"`
+}
+
+func defaultConfig() Config {
 	return Config{
-		Addr:            addr,
-		DatabasePath:    dbPath,
-		OutputRoot:      outputRoot,
-		WebDir:          webDir,
-		SessionSecret:   secret,
-		AdminUsername:   os.Getenv("VIBE_ADMIN_USER"),
-		AdminPassword:   os.Getenv("VIBE_ADMIN_PASSWORD"),
+		Addr:            ":8080",
+		DatabasePath:    "data/vibe-terminal.db",
+		OutputRoot:      "workspace-data",
+		WebDir:          "web/dist",
+		SessionSecret:   []byte("dev-session-secret-32-bytes-long"),
 		SessionDuration: 24 * time.Hour,
 	}
 }
 
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+func loadFile(path string) (fileConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("read config file %q: %w", path, err)
 	}
-	return fallback
+	var cfg fileConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		return fileConfig{}, fmt.Errorf("parse config file %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func applyFile(cfg *Config, file fileConfig) {
+	if file.Addr != "" {
+		cfg.Addr = file.Addr
+	}
+	if file.DatabasePath != "" {
+		cfg.DatabasePath = file.DatabasePath
+	}
+	if file.OutputRoot != "" {
+		cfg.OutputRoot = file.OutputRoot
+	}
+	if file.WebDir != "" {
+		cfg.WebDir = file.WebDir
+	}
+	if file.SessionSecret != "" {
+		cfg.SessionSecret = []byte(file.SessionSecret)
+	}
+	if file.AdminUsername != "" {
+		cfg.AdminUsername = file.AdminUsername
+	}
+	if file.AdminPassword != "" {
+		cfg.AdminPassword = file.AdminPassword
+	}
+}
+
+func applyEnv(cfg *Config) {
+	if value := os.Getenv("VIBE_ADDR"); value != "" {
+		cfg.Addr = value
+	}
+	if value := os.Getenv("VIBE_DB"); value != "" {
+		cfg.DatabasePath = value
+	}
+	if value := os.Getenv("VIBE_OUTPUT_ROOT"); value != "" {
+		cfg.OutputRoot = value
+	}
+	if value := os.Getenv("VIBE_WEB_DIR"); value != "" {
+		cfg.WebDir = value
+	}
+	if value := os.Getenv("VIBE_SESSION_SECRET"); value != "" {
+		cfg.SessionSecret = []byte(value)
+	}
+	if value := os.Getenv("VIBE_ADMIN_USER"); value != "" {
+		cfg.AdminUsername = value
+	}
+	if value := os.Getenv("VIBE_ADMIN_PASSWORD"); value != "" {
+		cfg.AdminPassword = value
+	}
 }

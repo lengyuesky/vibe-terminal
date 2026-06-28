@@ -128,17 +128,25 @@ token 管理规则：
 
 ## 配置
 
-服务端通过环境变量配置：
+Docker Compose 部署通过 `config.yaml` 配置服务端。先复制示例文件：
 
-| 变量 | 默认值 | 说明 |
+```bash
+cp config.example.yaml config.yaml
+```
+
+`config.yaml` 字段：
+
+| 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `VIBE_ADDR` | `:8080` | HTTP/WebSocket 监听地址 |
-| `VIBE_DB` | `data/vibe-terminal.db` | SQLite 数据库路径 |
-| `VIBE_OUTPUT_ROOT` | `workspace-data` | 终端输出持久化目录 |
-| `VIBE_WEB_DIR` | `web/dist` | 前端静态资源目录 |
-| `VIBE_SESSION_SECRET` | 开发默认值 | Cookie 签名密钥，生产环境必须替换 |
-| `VIBE_ADMIN_USER` | 空 | 启动时创建的管理员用户名 |
-| `VIBE_ADMIN_PASSWORD` | 空 | 启动时创建的管理员密码 |
+| `addr` | `:8080` | HTTP/WebSocket 监听地址 |
+| `database_path` | `data/vibe-terminal.db` | SQLite 数据库路径 |
+| `output_root` | `workspace-data` | 终端输出持久化目录 |
+| `web_dir` | `web/dist` | 前端静态资源目录 |
+| `session_secret` | 开发默认值 | Cookie 签名密钥，生产环境必须替换 |
+| `admin_username` | 空 | 启动时创建的管理员用户名 |
+| `admin_password` | 空 | 启动时创建的管理员密码 |
+
+服务端启动时会读取 `VIBE_CONFIG` 指向的 YAML 文件；未设置 `VIBE_CONFIG` 时仍使用默认值和环境变量。以下环境变量可覆盖 YAML 中的同名配置：`VIBE_ADDR`、`VIBE_DB`、`VIBE_OUTPUT_ROOT`、`VIBE_WEB_DIR`、`VIBE_SESSION_SECRET`、`VIBE_ADMIN_USER`、`VIBE_ADMIN_PASSWORD`。
 
 agent 注册后会把设备 ID、服务端地址和凭据保存到用户配置目录。运行 `cargo run -- run` 时会读取该配置并连接服务端。
 
@@ -198,9 +206,8 @@ docker pull ghcr.io/lengyuesky/vibe-terminal:latest
 Docker Compose：
 
 ```bash
-export VIBE_SESSION_SECRET="$(openssl rand -base64 32)"
-export VIBE_ADMIN_USER="admin"
-export VIBE_ADMIN_PASSWORD="replace-with-a-long-password"
+cp config.example.yaml config.yaml
+# 编辑 config.yaml，至少替换 session_secret 和 admin_password
 docker compose up -d --build
 ```
 

@@ -19,7 +19,10 @@ import (
 
 func main() {
 	ctx := context.Background()
-	cfg := config.FromEnv()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
 	if err := ensureDatabaseDir(cfg.DatabasePath); err != nil {
 		log.Fatalf("prepare database directory: %v", err)
 	}

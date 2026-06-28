@@ -59,7 +59,7 @@ type Device struct {
 	Fingerprint    string
 	CredentialHash string
 	Authorized     bool
-	LastSeenAt      sql.NullTime
+	LastSeenAt     sql.NullTime
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -253,6 +253,39 @@ func (db *DB) ListAgentTokens(ctx context.Context) ([]AgentToken, error) {
 		tokens = append(tokens, token)
 	}
 	return tokens, rows.Err()
+}
+
+func (db *DB) RevokeAgentToken(ctx context.Context, id string, revokedAt time.Time) (AgentToken, error) {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return AgentToken{}, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx,
+		`select id, name, token_hash, expires_at, used_at, revoked_at, created_at
+		 from agent_tokens where id = ?`,
+		id)
+	var token AgentToken
+	err = row.Scan(&token.ID, &token.Name, &token.TokenHash, &token.ExpiresAt, &token.UsedAt, &token.RevokedAt, &token.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AgentToken{}, ErrNotFound
+	}
+	if err != nil {
+		return AgentToken{}, err
+	}
+	if token.RevokedAt.Valid {
+		return token, tx.Commit()
+	}
+	_, err = tx.ExecContext(ctx, `update agent_tokens set revoked_at = ? where id = ?`, revokedAt, id)
+	if err != nil {
+		return AgentToken{}, err
+	}
+	token.RevokedAt = sql.NullTime{Time: revokedAt, Valid: true}
+	if err := tx.Commit(); err != nil {
+		return AgentToken{}, err
+	}
+	return token, nil
 }
 
 func (db *DB) UseAgentTokenByHash(ctx context.Context, tokenHash string, usedAt time.Time) (AgentToken, error) {

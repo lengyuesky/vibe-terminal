@@ -17,6 +17,17 @@ export type SessionOutputChunk = {
   end_seq: number;
   data: string;
 };
+export type AgentToken = {
+  id: string;
+  name: string;
+  expires_at: string;
+  used_at?: string;
+  revoked_at?: string;
+  created_at: string;
+};
+export type CreatedAgentToken = AgentToken & {
+  token: string;
+};
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -42,6 +53,23 @@ export function login(username: string, password: string): Promise<User> {
 
 export function me(): Promise<User> {
   return request<User>('/api/me');
+}
+
+export function listAgentTokens(): Promise<AgentToken[]> {
+  return request<AgentToken[]>('/api/agent-tokens');
+}
+
+export function createAgentToken(name: string, ttlHours: number): Promise<CreatedAgentToken> {
+  return request<CreatedAgentToken>('/api/agent-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ name, ttl_hours: ttlHours }),
+  });
+}
+
+export function revokeAgentToken(id: string): Promise<AgentToken> {
+  return request<AgentToken>(`/api/agent-tokens/${id}`, {
+    method: 'DELETE',
+  });
 }
 
 export function listDevices(): Promise<Device[]> {

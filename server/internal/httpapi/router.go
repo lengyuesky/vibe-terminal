@@ -79,6 +79,7 @@ func (r *router) routes() {
 	r.mux.HandleFunc("GET /api/me", r.handleMe)
 	r.mux.HandleFunc("POST /api/agent-tokens", r.handleCreateAgentToken)
 	r.mux.HandleFunc("GET /api/agent-tokens", r.handleListAgentTokens)
+	r.mux.HandleFunc("DELETE /api/agent-tokens/", r.handleRevokeAgentToken)
 	r.mux.HandleFunc("POST /api/agents/register", r.handleAgentRegister)
 	r.mux.HandleFunc("GET /api/devices", r.handleListDevices)
 	r.mux.HandleFunc("/api/devices/", r.handleDeviceRoutes)
@@ -166,12 +167,39 @@ func (r *router) handleCreateAgentToken(w http.ResponseWriter, req *http.Request
 		EventType: "agent_token_created",
 		Summary:   "agent registration token created",
 	})
-	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":         token.ID,
-		"name":       token.Name,
-		"expires_at": token.ExpiresAt.Format(time.RFC3339),
-		"token":      rawToken,
+	resp := agentTokenToResponse(token)
+	writeJSON(w, http.StatusCreated, struct {
+		agentTokenResponse
+		Token string `json:"token"`
+	}{
+		agentTokenResponse: resp,
+		Token:              rawToken,
 	})
+}
+
+type agentTokenResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ExpiresAt string `json:"expires_at"`
+	UsedAt    string `json:"used_at,omitempty"`
+	RevokedAt string `json:"revoked_at,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+func agentTokenToResponse(token store.AgentToken) agentTokenResponse {
+	resp := agentTokenResponse{
+		ID:        token.ID,
+		Name:      token.Name,
+		ExpiresAt: token.ExpiresAt.Format(time.RFC3339),
+		CreatedAt: token.CreatedAt.Format(time.RFC3339),
+	}
+	if token.UsedAt.Valid {
+		resp.UsedAt = token.UsedAt.Time.Format(time.RFC3339)
+	}
+	if token.RevokedAt.Valid {
+		resp.RevokedAt = token.RevokedAt.Time.Format(time.RFC3339)
+	}
+	return resp
 }
 
 func (r *router) handleListAgentTokens(w http.ResponseWriter, req *http.Request) {
@@ -183,31 +211,38 @@ func (r *router) handleListAgentTokens(w http.ResponseWriter, req *http.Request)
 		writeError(w, http.StatusInternalServerError, "token_error", "failed to list tokens")
 		return
 	}
-	type tokenResponse struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		ExpiresAt string `json:"expires_at"`
-		UsedAt    string `json:"used_at,omitempty"`
-		RevokedAt string `json:"revoked_at,omitempty"`
-		CreatedAt string `json:"created_at"`
-	}
-	out := make([]tokenResponse, 0, len(tokens))
+	out := make([]agentTokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		resp := tokenResponse{
-			ID:        token.ID,
-			Name:      token.Name,
-			ExpiresAt: token.ExpiresAt.Format(time.RFC3339),
-			CreatedAt: token.CreatedAt.Format(time.RFC3339),
-		}
-		if token.UsedAt.Valid {
-			resp.UsedAt = token.UsedAt.Time.Format(time.RFC3339)
-		}
-		if token.RevokedAt.Valid {
-			resp.RevokedAt = token.RevokedAt.Time.Format(time.RFC3339)
-		}
-		out = append(out, resp)
+		out = append(out, agentTokenToResponse(token))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (r *router) handleRevokeAgentToken(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	id := strings.TrimPrefix(req.URL.Path, "/api/agent-tokens/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "not_found", "agent token not found")
+		return
+	}
+	token, err := r.store.RevokeAgentToken(req.Context(), id, time.Now().UTC())
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "agent token not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token_error", "failed to revoke token")
+		return
+	}
+	_ = r.audit.Log(req.Context(), store.AuditEvent{
+		UserID:    user.ID,
+		EventType: "agent_token_revoked",
+		Summary:   "agent registration token revoked",
+	})
+	writeJSON(w, http.StatusOK, agentTokenToResponse(token))
 }
 
 func (r *router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {

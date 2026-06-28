@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -57,6 +58,59 @@ func TestCreateAndUseAgentToken(t *testing.T) {
 	_, err = db.UseAgentTokenByHash(ctx, "hash-1", time.Now())
 	if err == nil {
 		t.Fatal("reusing token should fail")
+	}
+}
+
+func TestRevokeAgentToken(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	expiresAt := time.Now().Add(time.Hour)
+	_, err = db.CreateAgentToken(ctx, CreateAgentTokenParams{
+		ID:        "tok-revoke",
+		Name:      "laptop",
+		TokenHash: "hash-revoke",
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	revokedAt := time.Now().UTC().Truncate(time.Second)
+	revoked, err := db.RevokeAgentToken(ctx, "tok-revoke", revokedAt)
+	if err != nil {
+		t.Fatalf("revoke token: %v", err)
+	}
+	if !revoked.RevokedAt.Valid {
+		t.Fatal("revoked token should have revoked_at")
+	}
+	if !revoked.RevokedAt.Time.Equal(revokedAt) {
+		t.Fatalf("revoked_at = %s, want %s", revoked.RevokedAt.Time, revokedAt)
+	}
+
+	_, err = db.UseAgentTokenByHash(ctx, "hash-revoke", time.Now().UTC())
+	if err == nil {
+		t.Fatal("revoked token should not be usable")
+	}
+
+	later := revokedAt.Add(time.Hour)
+	again, err := db.RevokeAgentToken(ctx, "tok-revoke", later)
+	if err != nil {
+		t.Fatalf("revoke token again: %v", err)
+	}
+	if !again.RevokedAt.Time.Equal(revokedAt) {
+		t.Fatalf("second revoke changed revoked_at to %s", again.RevokedAt.Time)
+	}
+
+	_, err = db.RevokeAgentToken(ctx, "missing-token", time.Now().UTC())
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing token error = %v, want ErrNotFound", err)
 	}
 }
 

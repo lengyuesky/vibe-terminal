@@ -6,12 +6,15 @@ import * as api from '../api';
 
 vi.mock('../api', () => ({
   closeSession: vi.fn(),
+  createAgentToken: vi.fn(),
   createSession: vi.fn(),
   listDevices: vi.fn(),
+  listAgentTokens: vi.fn(),
   listSessionOutput: vi.fn(),
   listSessions: vi.fn(),
   login: vi.fn(),
   me: vi.fn(),
+  revokeAgentToken: vi.fn(),
   renameSession: vi.fn(),
 }));
 
@@ -32,6 +35,13 @@ describe('AppView', () => {
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
       />
     );
     expect(screen.getByRole('button', { name: /login/i })).toBeInTheDocument();
@@ -50,6 +60,13 @@ describe('AppView', () => {
         onCloseSession={vi.fn()}
         onCreateSession={createSession}
         onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
       />
     );
     await userEvent.click(screen.getByRole('button', { name: /new terminal/i }));
@@ -87,6 +104,13 @@ describe('AppView', () => {
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
       />
     );
 
@@ -111,6 +135,13 @@ describe('AppView', () => {
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
       />
     );
 
@@ -135,6 +166,13 @@ describe('AppView', () => {
         onCloseSession={closeSession}
         onCreateSession={vi.fn()}
         onRenameSession={renameSession}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
       />
     );
 
@@ -152,5 +190,92 @@ describe('AppView', () => {
     await userEvent.click(screen.getByRole('button', { name: /confirm delete api server/i }));
     expect(closeSession).toHaveBeenCalledWith('sess-1');
     expect(screen.queryByRole('tab', { name: /api server/i })).not.toBeInTheDocument();
+  });
+
+  it('shows agent tokens after switching views', async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[]}
+        sessions={{}}
+        agentTokens={[
+          {
+            id: 'tok-available-123',
+            name: 'laptop',
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+        ]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={refresh}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /agent tokens/i }));
+
+    expect(screen.getByRole('heading', { name: /agent tokens/i })).toBeInTheDocument();
+    expect(screen.getByText('laptop')).toBeInTheDocument();
+    expect(screen.getByText('available')).toBeInTheDocument();
+    expect(refresh).toHaveBeenCalled();
+  });
+
+  it('creates and revokes agent tokens from the management view', async () => {
+    const createToken = vi.fn().mockResolvedValue(undefined);
+    const revokeToken = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[]}
+        sessions={{}}
+        agentTokens={[
+          {
+            id: 'tok-1',
+            name: 'desk',
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+        ]}
+        createdAgentToken={{
+          id: 'tok-new',
+          name: 'desk',
+          token: 'raw-token-once',
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        }}
+        tokenLoading={false}
+        tokenError={null}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCreateAgentToken={createToken}
+        onRevokeAgentToken={revokeToken}
+        onRefreshAgentTokens={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /agent tokens/i }));
+    await userEvent.clear(screen.getByLabelText(/name/i));
+    await userEvent.type(screen.getByLabelText(/name/i), 'rack');
+    await userEvent.clear(screen.getByLabelText(/ttl hours/i));
+    await userEvent.type(screen.getByLabelText(/ttl hours/i), '12');
+    await userEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(createToken).toHaveBeenCalledWith('rack', 12);
+    expect(screen.getByText('raw-token-once')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /revoke/i }));
+    expect(revokeToken).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: /confirm/i }));
+    expect(revokeToken).toHaveBeenCalledWith('tok-1');
   });
 });

@@ -1,9 +1,17 @@
 import { Terminal } from 'lucide-react';
 import type { Device } from '../api';
 
-export function DeviceList({ devices, onCreateSession }: { devices: Device[]; onCreateSession: (deviceId: string) => Promise<void> }) {
+export function DeviceList({
+  devices,
+  onCreateSession,
+  compact = false,
+}: {
+  devices: Device[];
+  onCreateSession: (deviceId: string) => Promise<void>;
+  compact?: boolean;
+}) {
   return (
-    <aside className="devices">
+    <section className={compact ? 'devicesPanel compact' : 'devices'}>
       <h2>Devices</h2>
       {devices.map((device) => (
         <section key={device.id} className="deviceRow">
@@ -18,6 +26,6 @@ export function DeviceList({ devices, onCreateSession }: { devices: Device[]; on
           </button>
         </section>
       ))}
-    </aside>
+    </section>
   );
 }

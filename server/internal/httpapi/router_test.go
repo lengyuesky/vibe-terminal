@@ -104,6 +104,110 @@ func TestLoginMeAndAgentTokenFlow(t *testing.T) {
 	}
 }
 
+func TestAgentTokenRevokeFlow(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.NewStore(t)
+	hash, err := auth.HashPassword("secret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	_, err = db.CreateUser(ctx, store.User{ID: "user-1", Username: "admin", PasswordHash: hash})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	handler := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+	})
+
+	loginRR := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(loginRR, loginReq)
+	cookies := loginRR.Result().Cookies()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/agent-tokens", bytes.NewBufferString(`{"name":"desk","ttl_hours":24}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		createReq.AddCookie(cookie)
+	}
+	createRR := httptest.NewRecorder()
+	handler.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", createRR.Code, createRR.Body.String())
+	}
+	var created map[string]string
+	if err := json.Unmarshal(createRR.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/"+created["id"], nil)
+	for _, cookie := range cookies {
+		revokeReq.AddCookie(cookie)
+	}
+	revokeRR := httptest.NewRecorder()
+	handler.ServeHTTP(revokeRR, revokeReq)
+	if revokeRR.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d body=%s", revokeRR.Code, revokeRR.Body.String())
+	}
+	var revoked map[string]string
+	if err := json.Unmarshal(revokeRR.Body.Bytes(), &revoked); err != nil {
+		t.Fatalf("decode revoke response: %v", err)
+	}
+	if revoked["revoked_at"] == "" {
+		t.Fatalf("revoked response missing revoked_at: %#v", revoked)
+	}
+	if revoked["token"] != "" {
+		t.Fatalf("revoke response must not include raw token: %#v", revoked)
+	}
+
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(`{"token":"`+created["token"]+`","name":"desk","platform":"linux","agent_version":"0.1.0","fingerprint":"fp-revoked"}`))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRR := httptest.NewRecorder()
+	handler.ServeHTTP(registerRR, registerReq)
+	if registerRR.Code != http.StatusUnauthorized {
+		t.Fatalf("register with revoked token status = %d body=%s", registerRR.Code, registerRR.Body.String())
+	}
+}
+
+func TestRevokeAgentTokenRequiresLoginAndHandlesMissingToken(t *testing.T) {
+	db := testutil.NewStore(t)
+	handler := NewRouter(Deps{
+		Store:    db,
+		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
+	})
+
+	unauthReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/missing", nil)
+	unauthRR := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRR, unauthReq)
+	if unauthRR.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated revoke status = %d body=%s", unauthRR.Code, unauthRR.Body.String())
+	}
+
+	hash, err := auth.HashPassword("secret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	_, err = db.CreateUser(context.Background(), store.User{ID: "user-1", Username: "admin", PasswordHash: hash})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	loginRR := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(loginRR, loginReq)
+
+	missingReq := httptest.NewRequest(http.MethodDelete, "/api/agent-tokens/missing", nil)
+	for _, cookie := range loginRR.Result().Cookies() {
+		missingReq.AddCookie(cookie)
+	}
+	missingRR := httptest.NewRecorder()
+	handler.ServeHTTP(missingRR, missingReq)
+	if missingRR.Code != http.StatusNotFound {
+		t.Fatalf("missing revoke status = %d body=%s", missingRR.Code, missingRR.Body.String())
+	}
+}
+
 func TestCreateSessionRequiresOnlineDevice(t *testing.T) {
 	db := testutil.NewStore(t)
 	_, err := db.CreateDevice(context.Background(), store.Device{

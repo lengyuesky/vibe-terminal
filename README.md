@@ -9,6 +9,8 @@
 - 单管理员登录，基于 Cookie 维护 Web 会话。
 - Rust agent 主动连回服务端，被控机器无需开放入站端口。
 - 在线设备列表和多终端标签页。
+- 前端管理 agent 注册 token，创建后显示一次性 token 和被控端运行命令。
+- 支持撤销 agent 注册 token，并对已撤销 token 执行永久删除。
 - 浏览器刷新后恢复会话列表和已持久化输出。
 - 服务端重启后，agent 重连并同步本地记录的会话状态。
 - 终端输入、输出、窗口尺寸 resize 同步。
@@ -46,7 +48,6 @@ Rust Agent
 server/   Go 服务端
 agent/    Rust agent
 web/      React Web UI
-docs/     协议、部署和设计文档
 deploy/   Caddy、systemd、launchd、WSL 示例
 ```
 
@@ -103,21 +104,16 @@ http://127.0.0.1:8080
 admin / admin123456
 ```
 
-创建 agent 注册 token：
+在 Web UI 左侧进入 `Agent Tokens`，创建注册 token。创建成功后页面会显示一次性 token 和被控端运行命令。按页面中的命令在被控端注册并运行 agent：
 
 ```bash
-curl -c /tmp/vibe-cookie.txt \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123456"}' \
-  http://127.0.0.1:8080/api/login
-
-curl -b /tmp/vibe-cookie.txt \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"local-agent","ttl_hours":24}' \
-  http://127.0.0.1:8080/api/agent-tokens
+vibe-agent register --server http://127.0.0.1:8080 --token <token>
+vibe-agent run
 ```
 
-使用返回的 `token` 注册并运行 agent：
+agent 在线后，Web UI 左侧设备列表会出现该设备。点击 `New terminal` 创建终端会话。
+
+源码开发时也可以直接用 Cargo 运行 agent：
 
 ```bash
 cd agent
@@ -125,7 +121,10 @@ cargo run -- register --server http://127.0.0.1:8080 --token <token>
 cargo run -- run
 ```
 
-agent 在线后，Web UI 左侧设备列表会出现该设备。点击 `New terminal` 创建终端会话。
+token 管理规则：
+
+- `Revoke` 会撤销 token，使其不能再注册新 agent。
+- 已撤销 token 会显示 `Delete`，二次确认后从数据库中永久删除。
 
 ## 配置
 
@@ -189,6 +188,13 @@ make docker-config
 
 ## 部署
 
+预构建镜像会推送到 GitHub Container Registry：
+
+```bash
+docker pull ghcr.io/lengyuesky/vibe-terminal:v1.0
+docker pull ghcr.io/lengyuesky/vibe-terminal:latest
+```
+
 Docker Compose：
 
 ```bash
@@ -201,7 +207,6 @@ docker compose up -d --build
 建议把服务部署在 Caddy 或 Nginx 后面，并只通过 HTTPS 暴露。示例配置：
 
 - `deploy/Caddyfile.example`
-- `docs/deployment.md`
 
 agent 常驻运行模板：
 
@@ -209,9 +214,21 @@ agent 常驻运行模板：
 - macOS：`deploy/launchd/com.vibe-terminal.agent.plist`
 - WSL：`deploy/scripts/vibe-agent-wsl.sh`
 
-## 协议
+## Release
 
-WebSocket 协议见 `docs/protocol/v1.md`。
+`v1.0` 已发布 GitHub Release：
+
+```text
+https://github.com/lengyuesky/vibe-terminal/releases/tag/v1.0
+```
+
+Release 附带以下 agent 可执行文件包：
+
+- `vibe-agent-linux-x86_64.tar.gz`
+- `vibe-agent-macos-aarch64.tar.gz`
+- `vibe-agent-macos-x86_64.tar.gz`
+
+## 协议
 
 入口：
 
@@ -243,7 +260,6 @@ WebSocket 协议见 `docs/protocol/v1.md`。
 
 ## 已知限制
 
-- 前端还没有 agent token 管理页面，需要通过 API 创建 token。
 - 不支持原生 Windows PowerShell/CMD agent。
 - 被控机器重启或 agent 崩溃后，真实 PTY 进程无法恢复。
 - 会话目录显示的是启动目录，不是 shell 实时工作目录。

@@ -80,19 +80,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Prune old SHA image versions
+      - name: Prune old image versions
         uses: actions/github-script@v7
         env:
           PACKAGE_NAME: ${{ github.event.repository.name }}
-          SHA_IMAGE_VERSIONS_TO_KEEP: "5"
+          IMAGE_VERSIONS_TO_KEEP: "5"
         with:
           script: |
             const owner = context.repo.owner;
             const packageName = process.env.PACKAGE_NAME;
-            const keep = Number.parseInt(process.env.SHA_IMAGE_VERSIONS_TO_KEEP, 10);
+            const keep = Number.parseInt(process.env.IMAGE_VERSIONS_TO_KEEP, 10);
 
             if (!Number.isInteger(keep) || keep < 1) {
-              throw new Error(`SHA_IMAGE_VERSIONS_TO_KEEP must be a positive integer, got ${process.env.SHA_IMAGE_VERSIONS_TO_KEEP}`);
+              throw new Error(`IMAGE_VERSIONS_TO_KEEP must be a positive integer, got ${process.env.IMAGE_VERSIONS_TO_KEEP}`);
             }
 
             const { data: ownerInfo } = await github.request('GET /users/{username}', {
@@ -114,19 +114,12 @@ jobs:
               : { username: owner, ...baseParams };
 
             const versions = await github.paginate(listRoute, listParams);
-            const protectedTag = (tag) => tag === 'latest' || tag === 'main' || tag.startsWith('v');
-            const shaOnlyVersions = versions
-              .filter((version) => {
-                const tags = version.metadata?.container?.tags ?? [];
-                const hasShaTag = tags.some((tag) => tag.startsWith('sha-'));
-                const hasProtectedTag = tags.some(protectedTag);
-                return hasShaTag && !hasProtectedTag;
-              })
+            const imageVersions = versions
               .sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
 
-            const versionsToDelete = shaOnlyVersions.slice(keep);
+            const versionsToDelete = imageVersions.slice(keep);
             core.info(`Found ${versions.length} active image versions.`);
-            core.info(`Found ${shaOnlyVersions.length} SHA-only image versions; keeping ${Math.min(keep, shaOnlyVersions.length)} and deleting ${versionsToDelete.length}.`);
+            core.info(`Keeping the latest ${Math.min(keep, imageVersions.length)} image versions and deleting ${versionsToDelete.length}.`);
 
             if (versionsToDelete.length === 0) {
               return;

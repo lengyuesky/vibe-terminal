@@ -452,15 +452,22 @@ input:focus-visible {
 .terminalArea {
   min-width: 0;
   display: grid;
-  grid-template-rows: 52px 58px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border-radius: var(--r-card);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+  overflow: hidden;
 }
 
 .tabs {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  padding: 6px;
-  border-bottom: 1px solid #282d35;
+  padding: 10px;
+  border-bottom: 1px solid var(--glass-border);
   overflow-x: auto;
 }
 
@@ -470,18 +477,37 @@ input:focus-visible {
   align-items: stretch;
   min-width: 180px;
   max-width: min(360px, calc(100vw - 24px));
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+  transition: border-color var(--t), background var(--t);
 }
 
-.tabButton {
-  flex: 1 1 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-content: center;
-  gap: 1px;
-  min-width: 0;
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  text-align: left;
+.tabs .tabButton {
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+.tabs .tabButton[aria-selected="true"] {
+  background: var(--accent-soft);
+  position: relative;
+}
+
+.tabs .tabButton[aria-selected="true"]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--accent-grad);
+}
+
+.tabItem:has(.tabButton[aria-selected="true"]) {
+  border-color: rgba(167, 139, 250, 0.45);
+  box-shadow: 0 0 16px rgba(167, 139, 250, 0.16);
 }
 
 .tabTitleLine,
@@ -510,7 +536,7 @@ input:focus-visible {
   min-width: 0;
   gap: 5px;
   align-items: center;
-  color: #a8b0bd;
+  color: var(--text-dim);
   font-size: 11px;
 }
 
@@ -528,9 +554,9 @@ input:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border: 1px solid #5b7696;
+  border: 1px solid rgba(129, 140, 248, 0.45);
   border-radius: 6px;
-  background: rgba(91, 118, 150, 0.22);
+  background: linear-gradient(135deg, rgba(129, 140, 248, 0.22), rgba(167, 139, 250, 0.18));
   color: #e5edf7;
   font-weight: 650;
   line-height: 1.35;
@@ -549,7 +575,7 @@ input:focus-visible {
 .tabSeparator,
 .tabSessionId {
   flex: 0 0 auto;
-  color: #7d8794;
+  color: var(--text-faint);
 }
 
 .statusBadge {
@@ -557,45 +583,43 @@ input:focus-visible {
   display: inline-flex;
   align-items: center;
   min-height: 18px;
-  border-radius: 999px;
-  padding: 0 6px;
+  border-radius: var(--r-pill);
+  padding: 0 7px;
   border: 1px solid transparent;
   line-height: 1;
 }
 
 .statusRunning {
-  border-color: #2f9d64;
-  background: rgba(47, 157, 100, 0.14);
-  color: #67d391;
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.14);
+  color: var(--ok);
+  animation: dotPulse 2.6s ease-in-out infinite;
 }
 
 .statusStarting {
-  border-color: #3d78bd;
-  background: rgba(61, 120, 189, 0.16);
-  color: #74b4ff;
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(96, 165, 250, 0.16);
+  color: var(--info);
+  animation: dotPulse 2.6s ease-in-out infinite;
 }
 
 .statusLost {
-  border-color: #c95b44;
-  background: rgba(201, 91, 68, 0.17);
-  color: #ff9b73;
+  border-color: rgba(251, 146, 108, 0.5);
+  background: rgba(251, 146, 108, 0.17);
+  color: #ffb089;
 }
 
 .statusExited {
-  border-color: #697484;
-  background: rgba(105, 116, 132, 0.18);
-  color: #b7beca;
+  border-color: rgba(148, 163, 184, 0.45);
+  background: rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
 }
 
 .statusClosed,
 .statusUnknown {
-  border-color: #525b67;
-  background: rgba(82, 91, 103, 0.16);
-  color: #a8b0bd;
-}
-
-.tabs .tabButton[aria-selected="true"] {
-  background: #37516f;
+  border-color: rgba(148, 163, 184, 0.40);
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-dim);
 }
 
 .tabActions {
@@ -606,25 +630,23 @@ input:focus-visible {
 .tabs .iconButton {
   display: inline-grid;
   place-items: center;
-  min-width: 34px;
-  width: 34px;
+  min-width: 36px;
+  width: 36px;
   padding: 0;
-  border-left: 0;
+  border: 0;
+  border-left: 1px solid var(--glass-border);
   border-radius: 0;
-}
-
-.tabs .iconButton:last-child {
-  border-top-right-radius: 6px;
-  border-bottom-right-radius: 6px;
+  background: transparent;
 }
 
 .tabs .iconButton:hover:not(:disabled),
 .tabs .tabButton:hover:not(:disabled) {
-  background: #30425a;
+  background: rgba(255, 255, 255, 0.10);
 }
 
 .tabs .danger:hover:not(:disabled) {
-  background: #633238;
+  background: rgba(251, 113, 133, 0.20);
+  color: #ffb3bf;
 }
 
 .tabs button:disabled,
@@ -909,9 +931,9 @@ input:focus-visible {
   min-width: 0;
   display: flex;
   align-items: center;
-  padding: 8px 14px;
-  border-bottom: 1px solid #282d35;
-  background: #15181d;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .terminalHeader div {
@@ -936,7 +958,7 @@ input:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #a8b0bd;
+  color: var(--text-dim);
   font-size: 12px;
 }
 

@@ -174,17 +174,14 @@ input {
 .secondaryButton,
 .iconTextButton,
 .dangerButton {
-  min-height: 34px;
-  border-radius: 6px;
-  border: 1px solid #46515f;
-  background: #253244;
-  color: #f4f5f7;
-  padding: 0 12px;
-}
-
-.primaryButton {
-  border-color: #2f9d64;
-  background: #2f6f4b;
+  min-height: 36px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border-strong);
+  background: var(--glass-bg-strong);
+  color: var(--text);
+  padding: 0 14px;
+  cursor: pointer;
+  transition: transform var(--t-fast), background var(--t), border-color var(--t), box-shadow var(--t);
 }
 
 .deviceRow button,
@@ -199,8 +196,72 @@ input {
   justify-content: center;
 }
 
+.loginForm button:hover:not(:disabled),
+.deviceRow button:hover:not(:disabled),
+.tabs button:hover:not(:disabled),
+.sideNav button:hover:not(:disabled),
+.tokenForm button:hover:not(:disabled),
+.secondaryButton:hover:not(:disabled),
+.iconTextButton:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--glass-border-strong);
+  transform: translateY(-1px);
+}
+
+.loginForm button:active:not(:disabled),
+.deviceRow button:active:not(:disabled),
+.sideNav button:active:not(:disabled),
+.tokenForm button:active:not(:disabled),
+.secondaryButton:active:not(:disabled),
+.iconTextButton:active:not(:disabled),
+.dangerButton:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.primaryButton {
+  border: 1px solid transparent;
+  background: var(--accent-grad);
+  color: #0b0d16;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(129, 140, 248, 0.30);
+}
+
+.primaryButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--accent-glow);
+}
+
+.dangerButton {
+  border-color: rgba(251, 113, 133, 0.45);
+  background: rgba(251, 113, 133, 0.16);
+  color: #ffb3bf;
+}
+
+.dangerButton:hover:not(:disabled) {
+  background: rgba(251, 113, 133, 0.24);
+  transform: translateY(-1px);
+}
+
+button:disabled,
 .deviceRow button:disabled {
   opacity: 0.45;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-ctrl);
+}
+
+input {
+  transition: border-color var(--t), box-shadow var(--t), background var(--t);
+}
+
+input:focus-visible {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .shell {
@@ -681,8 +742,7 @@ input {
   color: #b7beca;
 }
 
-.tokenStatus-revoked,
-.dangerButton {
+.tokenStatus-revoked {
   border-color: #c95b44;
   background: rgba(201, 91, 68, 0.17);
   color: #ff9b73;

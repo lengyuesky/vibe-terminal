@@ -686,16 +686,19 @@ input:focus-visible {
 .tokenHeader p,
 .muted,
 .emptyState {
-  color: #a8b0bd;
+  color: var(--text-dim);
 }
 
 .tokenPanel {
   display: grid;
   gap: 14px;
-  padding: 16px;
-  border: 1px solid #30343a;
-  border-radius: 8px;
-  background: #181b20;
+  padding: 18px;
+  border-radius: var(--r-card);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
 }
 
 .createTokenPanel {
@@ -712,17 +715,17 @@ input:focus-visible {
 .tokenForm label {
   display: grid;
   gap: 6px;
-  color: #b9c0cc;
+  color: var(--text-dim);
 }
 
 .tokenForm input {
   width: 100%;
-  min-height: 38px;
-  border-radius: 6px;
-  border: 1px solid #3d444f;
-  background: #0f1115;
-  color: #f4f5f7;
-  padding: 0 10px;
+  min-height: 40px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border-strong);
+  background: rgba(8, 9, 16, 0.55);
+  color: var(--text);
+  padding: 0 12px;
 }
 
 .tokenSubmitButton {
@@ -733,10 +736,11 @@ input:focus-visible {
 .newToken {
   display: grid;
   gap: 14px;
-  padding: 14px;
-  border: 1px solid rgba(47, 157, 100, 0.72);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(47, 157, 100, 0.14), rgba(47, 157, 100, 0.08));
+  padding: 16px;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  border-radius: var(--r-card);
+  background: linear-gradient(180deg, rgba(52, 211, 153, 0.12), rgba(52, 211, 153, 0.05));
+  box-shadow: 0 0 24px rgba(52, 211, 153, 0.12);
 }
 
 .newTokenSummary {
@@ -748,14 +752,14 @@ input:focus-visible {
 
 .newTokenSummary span,
 .newTokenBlockHeader span {
-  color: #b9c0cc;
+  color: var(--text-dim);
   font-weight: 600;
 }
 
 .newTokenSummary strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #f4f5f7;
+  color: var(--text);
 }
 
 .newTokenGrid {
@@ -769,9 +773,9 @@ input:focus-visible {
   display: grid;
   gap: 10px;
   padding: 12px;
-  border: 1px solid rgba(61, 68, 79, 0.8);
-  border-radius: 8px;
-  background: rgba(15, 17, 21, 0.78);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-ctrl);
+  background: rgba(8, 9, 16, 0.55);
 }
 
 .newTokenBlockHeader {
@@ -790,13 +794,15 @@ input:focus-visible {
 .agentCommand {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #d6ffe5;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: #c7f9dd;
 }
 
 .tokenValue {
   padding: 10px;
-  border-radius: 6px;
-  background: #0b0d10;
+  border-radius: 8px;
+  background: rgba(4, 5, 9, 0.8);
 }
 
 .agentCommand {
@@ -804,8 +810,8 @@ input:focus-visible {
   gap: 4px;
   margin: 0;
   padding: 10px;
-  border-radius: 6px;
-  background: #0b0d10;
+  border-radius: 8px;
+  background: rgba(4, 5, 9, 0.8);
   white-space: pre-wrap;
 }
 
@@ -821,15 +827,26 @@ input:focus-visible {
 
 .tokenTable th,
 .tokenTable td {
-  padding: 10px;
-  border-bottom: 1px solid #282d35;
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--glass-border);
   text-align: left;
   vertical-align: middle;
 }
 
 .tokenTable th {
-  color: #b9c0cc;
+  color: var(--text-faint);
   font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.tokenTable tbody tr {
+  transition: background var(--t);
+}
+
+.tokenTable tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .tokenTable td:first-child {
@@ -838,7 +855,7 @@ input:focus-visible {
 }
 
 .tokenId {
-  color: #7d8794;
+  color: var(--text-faint);
   font-size: 12px;
 }
 
@@ -846,34 +863,34 @@ input:focus-visible {
   display: inline-flex;
   align-items: center;
   min-height: 22px;
-  border-radius: 999px;
-  padding: 0 8px;
+  border-radius: var(--r-pill);
+  padding: 0 9px;
   border: 1px solid transparent;
   line-height: 1;
 }
 
 .tokenStatus-available {
-  border-color: #2f9d64;
-  background: rgba(47, 157, 100, 0.14);
-  color: #67d391;
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.14);
+  color: var(--ok);
 }
 
 .tokenStatus-used {
-  border-color: #3d78bd;
-  background: rgba(61, 120, 189, 0.16);
-  color: #74b4ff;
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(96, 165, 250, 0.16);
+  color: var(--info);
 }
 
 .tokenStatus-expired {
-  border-color: #697484;
-  background: rgba(105, 116, 132, 0.18);
-  color: #b7beca;
+  border-color: rgba(148, 163, 184, 0.45);
+  background: rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
 }
 
 .tokenStatus-revoked {
-  border-color: #c95b44;
-  background: rgba(201, 91, 68, 0.17);
-  color: #ff9b73;
+  border-color: rgba(251, 113, 133, 0.5);
+  background: rgba(251, 113, 133, 0.16);
+  color: #ffb3bf;
 }
 
 @media (max-width: 820px) {

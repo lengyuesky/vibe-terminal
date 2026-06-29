@@ -485,6 +485,13 @@ input:focus-visible {
 }
 
 .tabs .tabButton {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  gap: 1px;
+  min-width: 0;
+  text-align: left;
   border: 0;
   background: transparent;
   border-radius: 0;

@@ -1,3 +1,4 @@
+import { Terminal } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 
 export function LoginView({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
@@ -18,7 +19,10 @@ export function LoginView({ onLogin }: { onLogin: (username: string, password: s
   return (
     <main className="login">
       <form onSubmit={submit} className="loginForm">
-        <h1>vibe-terminal</h1>
+        <h1 className="loginBrand">
+          <Terminal size={22} aria-hidden="true" />
+          vibe-terminal
+        </h1>
         <label>
           Username
           <input value={username} onChange={(event) => setUsername(event.target.value)} />

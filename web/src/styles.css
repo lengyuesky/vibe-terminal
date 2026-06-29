@@ -134,36 +134,66 @@ input {
   min-height: 100vh;
   display: grid;
   place-items: center;
+  padding: 24px;
 }
 
 .loginForm {
-  width: min(360px, calc(100vw - 32px));
+  width: min(380px, calc(100vw - 32px));
   display: grid;
-  gap: 14px;
-  padding: 24px;
-  border: 1px solid #30343a;
-  border-radius: 8px;
-  background: #181b20;
+  gap: 16px;
+  padding: 28px;
+  border-radius: var(--r-card);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+  animation: cardIn 420ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
-.loginForm h1 {
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.loginBrand {
   margin: 0 0 8px;
-  font-size: 24px;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #c4b5fd 0%, #93c5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.loginBrand svg {
+  color: var(--accent);
 }
 
 .loginForm label {
   display: grid;
   gap: 6px;
-  color: #b9c0cc;
+  color: var(--text-dim);
+  font-size: 14px;
 }
 
 .loginForm input {
-  min-height: 38px;
-  border-radius: 6px;
-  border: 1px solid #3d444f;
-  background: #0f1115;
-  color: #f4f5f7;
-  padding: 0 10px;
+  min-height: 40px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border-strong);
+  background: rgba(8, 9, 16, 0.55);
+  color: var(--text);
+  padding: 0 12px;
 }
 
 .loginForm button,

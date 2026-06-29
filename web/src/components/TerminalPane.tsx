@@ -75,7 +75,38 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
     }
 
     try {
-      terminal = new Terminal({ cursorBlink: !readOnly, disableStdin: readOnly, convertEol: true });
+      terminal = new Terminal({
+        cursorBlink: !readOnly,
+        disableStdin: readOnly,
+        convertEol: true,
+        fontFamily:
+          "'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
+        fontSize: 13,
+        lineHeight: 1.3,
+        theme: {
+          background: '#0b0d16',
+          foreground: '#e8eaf2',
+          cursor: '#a78bfa',
+          cursorAccent: '#0b0d16',
+          selectionBackground: 'rgba(167, 139, 250, 0.35)',
+          black: '#1a1d29',
+          red: '#fb7185',
+          green: '#34d399',
+          yellow: '#fbbf24',
+          blue: '#60a5fa',
+          magenta: '#c084fc',
+          cyan: '#22d3ee',
+          white: '#e8eaf2',
+          brightBlack: '#4b5163',
+          brightRed: '#fda4af',
+          brightGreen: '#6ee7b7',
+          brightYellow: '#fde68a',
+          brightBlue: '#93c5fd',
+          brightMagenta: '#d8b4fe',
+          brightCyan: '#67e8f9',
+          brightWhite: '#f8fafc',
+        },
+      });
       const fit = new FitAddon();
       terminal.loadAddon(fit);
       terminal.open(ref.current);

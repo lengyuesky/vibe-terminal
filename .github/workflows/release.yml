@@ -80,6 +80,71 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Prune old SHA image versions
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ github.event.repository.name }}
+          SHA_IMAGE_VERSIONS_TO_KEEP: "5"
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const packageName = process.env.PACKAGE_NAME;
+            const keep = Number.parseInt(process.env.SHA_IMAGE_VERSIONS_TO_KEEP, 10);
+
+            if (!Number.isInteger(keep) || keep < 1) {
+              throw new Error(`SHA_IMAGE_VERSIONS_TO_KEEP must be a positive integer, got ${process.env.SHA_IMAGE_VERSIONS_TO_KEEP}`);
+            }
+
+            const { data: ownerInfo } = await github.request('GET /users/{username}', {
+              username: owner,
+            });
+            const isOrg = ownerInfo.type === 'Organization';
+
+            const baseParams = {
+              package_type: 'container',
+              package_name: packageName,
+              state: 'active',
+              per_page: 100,
+            };
+            const listRoute = isOrg
+              ? 'GET /orgs/{org}/packages/{package_type}/{package_name}/versions'
+              : 'GET /users/{username}/packages/{package_type}/{package_name}/versions';
+            const listParams = isOrg
+              ? { org: owner, ...baseParams }
+              : { username: owner, ...baseParams };
+
+            const versions = await github.paginate(listRoute, listParams);
+            const protectedTag = (tag) => tag === 'latest' || tag === 'main' || tag.startsWith('v');
+            const shaOnlyVersions = versions
+              .filter((version) => {
+                const tags = version.metadata?.container?.tags ?? [];
+                const hasShaTag = tags.some((tag) => tag.startsWith('sha-'));
+                const hasProtectedTag = tags.some(protectedTag);
+                return hasShaTag && !hasProtectedTag;
+              })
+              .sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
+
+            const versionsToDelete = shaOnlyVersions.slice(keep);
+            core.info(`Found ${versions.length} active image versions.`);
+            core.info(`Found ${shaOnlyVersions.length} SHA-only image versions; keeping ${Math.min(keep, shaOnlyVersions.length)} and deleting ${versionsToDelete.length}.`);
+
+            if (versionsToDelete.length === 0) {
+              return;
+            }
+
+            const deleteRoute = isOrg
+              ? 'DELETE /orgs/{org}/packages/{package_type}/{package_name}/versions/{package_version_id}'
+              : 'DELETE /users/{username}/packages/{package_type}/{package_name}/versions/{package_version_id}';
+
+            for (const version of versionsToDelete) {
+              const tags = version.metadata?.container?.tags ?? [];
+              core.info(`Deleting image version ${version.id} (${tags.join(', ') || 'untagged'}, created ${version.created_at}).`);
+              const deleteParams = isOrg
+                ? { org: owner, package_type: 'container', package_name: packageName, package_version_id: version.id }
+                : { username: owner, package_type: 'container', package_name: packageName, package_version_id: version.id };
+              await github.request(deleteRoute, deleteParams);
+            }
+
   agent:
     name: Build agent (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}

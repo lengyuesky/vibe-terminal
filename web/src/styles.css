@@ -894,15 +894,6 @@ input:focus-visible {
 }
 
 @media (max-width: 820px) {
-  .shell {
-    grid-template-columns: 1fr;
-  }
-
-  .devices {
-    border-radius: var(--r-card);
-    border: 1px solid var(--glass-border);
-  }
-
   .tokenForm,
   .newTokenGrid {
     grid-template-columns: 1fr;
@@ -1037,10 +1028,10 @@ input:focus-visible {
   .shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
   }
 
   .devices {
-    border-radius: var(--r-card);
-    border: 1px solid var(--glass-border);
+    overflow-y: visible;
   }
 }

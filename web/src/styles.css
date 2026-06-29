@@ -244,6 +244,7 @@ input {
 .tokenForm button:active:not(:disabled),
 .secondaryButton:active:not(:disabled),
 .iconTextButton:active:not(:disabled),
+.primaryButton:active:not(:disabled),
 .dangerButton:active:not(:disabled) {
   transform: translateY(0);
 }
@@ -253,7 +254,7 @@ input {
   background: var(--accent-grad);
   color: #0b0d16;
   font-weight: 600;
-  box-shadow: 0 6px 18px rgba(129, 140, 248, 0.30);
+  box-shadow: 0 6px 18px rgba(129, 140, 248, 0.3);
 }
 
 .primaryButton:hover:not(:disabled) {

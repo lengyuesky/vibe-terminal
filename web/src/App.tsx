@@ -1,4 +1,4 @@
-import { KeyRound, Monitor } from 'lucide-react';
+import { KeyRound, Monitor, Terminal } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, Session, User } from './api';
 import * as api from './api';
@@ -240,6 +240,10 @@ export function AppView({
   return (
     <div className="shell">
       <aside className="devices">
+        <div className="brand">
+          <Terminal size={18} aria-hidden="true" />
+          <span>vibe-terminal</span>
+        </div>
         <nav className="sideNav" aria-label="Primary">
           <button className={viewMode === 'terminals' ? 'active' : ''} onClick={() => setViewMode('terminals')}>
             <Monitor size={16} aria-hidden="true" />

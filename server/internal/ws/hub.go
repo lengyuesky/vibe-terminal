@@ -13,6 +13,7 @@ var ErrNoSessionRoute = errors.New("session route not found")
 type Outbound struct {
 	Type      string
 	SessionID string
+	RequestID string
 	Payload   any
 }
 
@@ -73,6 +74,16 @@ func (h *Hub) DetachAgent(deviceID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.agents, deviceID)
+}
+
+func (h *Hub) ToDevice(deviceID string, msg Outbound) error {
+	h.mu.RLock()
+	agent, ok := h.agents[deviceID]
+	h.mu.RUnlock()
+	if !ok {
+		return ErrNoAgent
+	}
+	return agent.Send(msg)
 }
 
 func (h *Hub) BindSession(sessionID string, deviceID string) {

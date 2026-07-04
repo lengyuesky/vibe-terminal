@@ -41,3 +41,25 @@ func TestHubBroadcastsAgentOutputToSubscribedWeb(t *testing.T) {
 		t.Fatalf("unexpected web message: %#v", got)
 	}
 }
+
+func TestHubToDeviceDeliversWithRequestID(t *testing.T) {
+	hub := NewHub()
+	agent := NewMemoryPeer("agent-dev-1")
+	hub.AttachAgent("dev-1", agent)
+
+	err := hub.ToDevice("dev-1", Outbound{Type: protocol.TypeFsList, RequestID: "req-1", Payload: protocol.FsList{Path: "/tmp"}})
+	if err != nil {
+		t.Fatalf("to device: %v", err)
+	}
+	got := agent.Pop()
+	if got.Type != protocol.TypeFsList || got.RequestID != "req-1" {
+		t.Fatalf("unexpected message: %#v", got)
+	}
+}
+
+func TestHubToDeviceErrorsWhenAgentMissing(t *testing.T) {
+	hub := NewHub()
+	if err := hub.ToDevice("dev-x", Outbound{Type: protocol.TypeFsList}); err != ErrNoAgent {
+		t.Fatalf("err = %v, want ErrNoAgent", err)
+	}
+}

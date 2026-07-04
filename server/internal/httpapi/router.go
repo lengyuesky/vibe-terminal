@@ -942,7 +942,13 @@ func (p *socketPeer) Send(msg wshub.Outbound) error {
 	defer p.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	data, err := protocol.EncodeEnvelope(msg.Type, msg.Payload)
+	var data []byte
+	var err error
+	if msg.RequestID != "" {
+		data, err = protocol.EncodeEnvelopeWithRequest(msg.Type, msg.RequestID, msg.Payload)
+	} else {
+		data, err = protocol.EncodeEnvelope(msg.Type, msg.Payload)
+	}
 	if err != nil {
 		return err
 	}

@@ -154,6 +154,55 @@ func TestDeleteRevokedAgentToken(t *testing.T) {
 	}
 }
 
+func newSnippetTestDB(t *testing.T) *DB {
+	t.Helper()
+	db, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestCommandSnippetCRUD(t *testing.T) {
+	ctx := context.Background()
+	db := newSnippetTestDB(t)
+
+	created, err := db.CreateCommandSnippet(ctx, CommandSnippet{ID: "snip-1", Name: "disk", Command: "df -h"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+		t.Fatal("timestamps must be set")
+	}
+
+	list, err := db.ListCommandSnippets(ctx)
+	if err != nil || len(list) != 1 || list[0].Command != "df -h" {
+		t.Fatalf("list = %#v err = %v", list, err)
+	}
+
+	updated, err := db.UpdateCommandSnippet(ctx, "snip-1", "disk usage", "df -h /")
+	if err != nil || updated.Name != "disk usage" || updated.Command != "df -h /" {
+		t.Fatalf("update = %#v err = %v", updated, err)
+	}
+
+	if err := db.DeleteCommandSnippet(ctx, "snip-1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := db.GetCommandSnippet(ctx, "snip-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get after delete = %v", err)
+	}
+	if err := db.DeleteCommandSnippet(ctx, "snip-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing = %v", err)
+	}
+	if _, err := db.UpdateCommandSnippet(ctx, "snip-1", "x", "y"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing = %v", err)
+	}
+}
+
 func TestDeviceSessionAndOutputRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, ":memory:")

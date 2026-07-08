@@ -98,6 +98,14 @@ type OutputChunk struct {
 	CreatedAt   time.Time
 }
 
+type CommandSnippet struct {
+	ID        string
+	Name      string
+	Command   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 func Open(ctx context.Context, path string) (*DB, error) {
 	sqlDB, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -174,6 +182,13 @@ func (db *DB) Migrate(ctx context.Context) error {
 			storage_path text not null,
 			byte_size integer not null,
 			created_at datetime not null
+		)`,
+		`create table if not exists command_snippets (
+			id text primary key,
+			name text not null,
+			command text not null,
+			created_at datetime not null,
+			updated_at datetime not null
 		)`,
 	}
 	for _, stmt := range statements {
@@ -548,6 +563,81 @@ func (db *DB) ListOutputChunks(ctx context.Context, sessionID string) ([]OutputC
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
+}
+
+func (db *DB) CreateCommandSnippet(ctx context.Context, snippet CommandSnippet) (CommandSnippet, error) {
+	now := time.Now().UTC()
+	if snippet.CreatedAt.IsZero() {
+		snippet.CreatedAt = now
+	}
+	if snippet.UpdatedAt.IsZero() {
+		snippet.UpdatedAt = now
+	}
+	_, err := db.SQL.ExecContext(ctx,
+		`insert into command_snippets (id, name, command, created_at, updated_at) values (?, ?, ?, ?, ?)`,
+		snippet.ID, snippet.Name, snippet.Command, snippet.CreatedAt, snippet.UpdatedAt)
+	return snippet, err
+}
+
+func (db *DB) GetCommandSnippet(ctx context.Context, id string) (CommandSnippet, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select id, name, command, created_at, updated_at from command_snippets where id = ?`, id)
+	var snippet CommandSnippet
+	err := row.Scan(&snippet.ID, &snippet.Name, &snippet.Command, &snippet.CreatedAt, &snippet.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CommandSnippet{}, ErrNotFound
+	}
+	return snippet, err
+}
+
+func (db *DB) ListCommandSnippets(ctx context.Context) ([]CommandSnippet, error) {
+	rows, err := db.SQL.QueryContext(ctx,
+		`select id, name, command, created_at, updated_at from command_snippets order by created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snippets []CommandSnippet
+	for rows.Next() {
+		var snippet CommandSnippet
+		if err := rows.Scan(&snippet.ID, &snippet.Name, &snippet.Command, &snippet.CreatedAt, &snippet.UpdatedAt); err != nil {
+			return nil, err
+		}
+		snippets = append(snippets, snippet)
+	}
+	return snippets, rows.Err()
+}
+
+func (db *DB) UpdateCommandSnippet(ctx context.Context, id string, name string, command string) (CommandSnippet, error) {
+	result, err := db.SQL.ExecContext(ctx,
+		`update command_snippets set name = ?, command = ?, updated_at = ? where id = ?`,
+		name, command, time.Now().UTC(), id)
+	if err != nil {
+		return CommandSnippet{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return CommandSnippet{}, err
+	}
+	if affected == 0 {
+		return CommandSnippet{}, ErrNotFound
+	}
+	return db.GetCommandSnippet(ctx, id)
+}
+
+func (db *DB) DeleteCommandSnippet(ctx context.Context, id string) error {
+	result, err := db.SQL.ExecContext(ctx, `delete from command_snippets where id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 type scanner interface {

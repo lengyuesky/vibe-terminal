@@ -5,3 +5,5 @@ web_dir: "/app/web"
 session_secret: "replace-with-a-random-32-byte-secret"
 admin_username: "admin"
 admin_password: "replace-with-a-long-password"
+# 上传单文件大小上限（字节），默认 512 MiB
+fs_max_upload_size: 536870912

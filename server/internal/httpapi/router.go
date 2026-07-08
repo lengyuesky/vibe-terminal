@@ -7,7 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,31 +21,43 @@ import (
 	"github.com/djy/vibe-terminal/server/internal/audit"
 	"github.com/djy/vibe-terminal/server/internal/auth"
 	"github.com/djy/vibe-terminal/server/internal/devices"
+	"github.com/djy/vibe-terminal/server/internal/files"
 	"github.com/djy/vibe-terminal/server/internal/protocol"
 	"github.com/djy/vibe-terminal/server/internal/store"
 	"github.com/djy/vibe-terminal/server/internal/terminal"
 	wshub "github.com/djy/vibe-terminal/server/internal/ws"
 )
 
+type FsService interface {
+	List(ctx context.Context, deviceID string, path string) (protocol.FsListResult, error)
+	Download(ctx context.Context, deviceID string, path string, onSize func(int64), w io.Writer) error
+	Upload(ctx context.Context, deviceID string, path string, size int64, overwrite bool, r io.Reader) error
+	HandleAgentResponse(env protocol.Envelope) bool
+}
+
 type Deps struct {
-	Store       *store.DB
-	Sessions    *auth.SessionManager
-	Presence    *devices.Presence
-	Audit       audit.Writer
-	Hub         *wshub.Hub
-	Output      terminal.OutputStore
-	StaticFiles http.FileSystem
+	Store           *store.DB
+	Sessions        *auth.SessionManager
+	Presence        *devices.Presence
+	Audit           audit.Writer
+	Hub             *wshub.Hub
+	Output          terminal.OutputStore
+	StaticFiles     http.FileSystem
+	Files           FsService
+	FsMaxUploadSize int64
 }
 
 type router struct {
-	store    *store.DB
-	sessions *auth.SessionManager
-	presence *devices.Presence
-	audit    audit.Writer
-	hub      *wshub.Hub
-	output   terminal.OutputStore
-	static   http.FileSystem
-	mux      *http.ServeMux
+	store       *store.DB
+	sessions    *auth.SessionManager
+	presence    *devices.Presence
+	audit       audit.Writer
+	hub         *wshub.Hub
+	output      terminal.OutputStore
+	static      http.FileSystem
+	files       FsService
+	fsMaxUpload int64
+	mux         *http.ServeMux
 }
 
 func NewRouter(deps Deps) http.Handler {
@@ -55,15 +70,23 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Hub == nil {
 		deps.Hub = wshub.NewHub()
 	}
+	if deps.Files == nil {
+		deps.Files = files.NewService(deps.Hub, deps.Presence)
+	}
+	if deps.FsMaxUploadSize <= 0 {
+		deps.FsMaxUploadSize = 512 << 20
+	}
 	r := &router{
-		store:    deps.Store,
-		sessions: deps.Sessions,
-		presence: deps.Presence,
-		audit:    deps.Audit,
-		hub:      deps.Hub,
-		output:   deps.Output,
-		static:   deps.StaticFiles,
-		mux:      http.NewServeMux(),
+		store:       deps.Store,
+		sessions:    deps.Sessions,
+		presence:    deps.Presence,
+		audit:       deps.Audit,
+		hub:         deps.Hub,
+		output:      deps.Output,
+		static:      deps.StaticFiles,
+		files:       deps.Files,
+		fsMaxUpload: deps.FsMaxUploadSize,
+		mux:         http.NewServeMux(),
 	}
 	r.routes()
 	return r
@@ -360,17 +383,21 @@ func (r *router) handleDeviceRoutes(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
-	if suffix != "sessions" {
-		writeError(w, http.StatusNotFound, "not_found", "route not found")
-		return
-	}
-	switch req.Method {
-	case http.MethodPost:
+	switch {
+	case suffix == "sessions" && req.Method == http.MethodPost:
 		r.handleCreateSession(w, req, deviceID)
-	case http.MethodGet:
+	case suffix == "sessions" && req.Method == http.MethodGet:
 		r.handleListSessions(w, req, deviceID)
-	default:
+	case suffix == "sessions":
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	case suffix == "fs" && req.Method == http.MethodGet:
+		r.handleFsList(w, req, deviceID)
+	case suffix == "fs/file" && req.Method == http.MethodGet:
+		r.handleFsDownload(w, req, deviceID)
+	case suffix == "fs/file" && req.Method == http.MethodPost:
+		r.handleFsUpload(w, req, deviceID)
+	default:
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
 }
 
@@ -469,6 +496,134 @@ func (r *router) handleListSessions(w http.ResponseWriter, req *http.Request, de
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (r *router) handleFsList(w http.ResponseWriter, req *http.Request, deviceID string) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	path := req.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "invalid_path", "path query parameter is required")
+		return
+	}
+	if _, err := r.store.GetDevice(req.Context(), deviceID); err != nil {
+		writeStoreError(w, err, "device")
+		return
+	}
+	result, err := r.files.List(req.Context(), deviceID, path)
+	if err != nil {
+		writeFsError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (r *router) handleFsDownload(w http.ResponseWriter, req *http.Request, deviceID string) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	path := req.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "invalid_path", "path query parameter is required")
+		return
+	}
+	if _, err := r.store.GetDevice(req.Context(), deviceID); err != nil {
+		writeStoreError(w, err, "device")
+		return
+	}
+	filename := path[strings.LastIndex(path, "/")+1:]
+	var fileSize int64
+	wroteHeader := false
+	err := r.files.Download(req.Context(), deviceID, path, func(size int64) {
+		fileSize = size
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		wroteHeader = true
+	}, w)
+	if err != nil {
+		if !wroteHeader {
+			writeFsError(w, err)
+		}
+		// 流已开始时中断：连接直接断开，客户端按 Content-Length 检测到截断。
+		return
+	}
+	metadata, _ := json.Marshal(map[string]any{"path": path, "bytes": fileSize})
+	_ = r.audit.Log(req.Context(), store.AuditEvent{
+		UserID:       user.ID,
+		DeviceID:     deviceID,
+		EventType:    "file_download",
+		Summary:      "file downloaded from device",
+		MetadataJSON: string(metadata),
+	})
+}
+
+func (r *router) handleFsUpload(w http.ResponseWriter, req *http.Request, deviceID string) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	path := req.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "invalid_path", "path query parameter is required")
+		return
+	}
+	overwrite := req.URL.Query().Get("overwrite") == "true"
+	if _, err := r.store.GetDevice(req.Context(), deviceID); err != nil {
+		writeStoreError(w, err, "device")
+		return
+	}
+	if req.ContentLength < 0 {
+		writeError(w, http.StatusLengthRequired, "length_required", "Content-Length is required")
+		return
+	}
+	if req.ContentLength > r.fsMaxUpload {
+		writeError(w, http.StatusRequestEntityTooLarge, "too_large", "file exceeds upload size limit")
+		return
+	}
+	body := http.MaxBytesReader(w, req.Body, r.fsMaxUpload)
+	defer body.Close()
+	if err := r.files.Upload(req.Context(), deviceID, path, req.ContentLength, overwrite, body); err != nil {
+		writeFsError(w, err)
+		return
+	}
+	metadata, _ := json.Marshal(map[string]any{"path": path, "bytes": req.ContentLength})
+	_ = r.audit.Log(req.Context(), store.AuditEvent{
+		UserID:       user.ID,
+		DeviceID:     deviceID,
+		EventType:    "file_upload",
+		Summary:      "file uploaded to device",
+		MetadataJSON: string(metadata),
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"path": path, "size": req.ContentLength})
+}
+
+func writeFsError(w http.ResponseWriter, err error) {
+	var opErr *files.OpError
+	if !errors.As(err, &opErr) {
+		writeError(w, http.StatusInternalServerError, "fs_error", "file operation failed")
+		return
+	}
+	status := http.StatusInternalServerError
+	switch opErr.Code {
+	case files.CodeAgentOffline, files.CodeAgentUnsupported:
+		status = http.StatusServiceUnavailable
+	case "not_found":
+		status = http.StatusNotFound
+	case "permission_denied":
+		status = http.StatusForbidden
+	case "not_a_file", "not_a_directory", "invalid_path", "invalid_request":
+		status = http.StatusBadRequest
+	case "already_exists":
+		status = http.StatusConflict
+	case files.CodeTimeout:
+		status = http.StatusGatewayTimeout
+	case files.CodeBusy:
+		status = http.StatusTooManyRequests
+	}
+	writeError(w, status, opErr.Code, opErr.Message)
+}
+
 func (r *router) handleSessionRoutes(w http.ResponseWriter, req *http.Request) {
 	rest := strings.TrimPrefix(req.URL.Path, "/api/sessions/")
 	sessionID, suffix, _ := strings.Cut(rest, "/")
@@ -557,6 +712,7 @@ func (r *router) handleAgentWebSocket(w http.ResponseWriter, req *http.Request) 
 
 	peer := &socketPeer{conn: conn}
 	r.presence.Set(device.ID, true)
+	r.presence.SetCapabilities(device.ID, hello.Capabilities)
 	_ = r.store.TouchDevice(ctx, device.ID, time.Now().UTC())
 	r.hub.AttachAgent(device.ID, peer)
 	r.syncAgentSessions(ctx, device.ID, hello.Sessions)
@@ -716,6 +872,10 @@ func (r *router) handleAgentEnvelope(ctx context.Context, deviceID string, env p
 			Status:    status,
 			Message:   msg.Message,
 		})
+	case protocol.TypeFsListResult, protocol.TypeFsReadResult, protocol.TypeFsWriteOpened,
+		protocol.TypeFsWriteAck, protocol.TypeFsWriteResult, protocol.TypeFsError:
+		// 迟到的响应（请求已超时删除）由 HandleAgentResponse 返回 false，直接丢弃。
+		_ = r.files.HandleAgentResponse(env)
 	case protocol.TypeError:
 		_ = r.audit.Log(ctx, store.AuditEvent{
 			DeviceID:  deviceID,

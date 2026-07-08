@@ -123,6 +123,26 @@ unknown_field: "value"
 	}
 }
 
+func TestFsMaxUploadSizeDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("VIBE_CONFIG", "")
+	t.Setenv("VIBE_FS_MAX_UPLOAD_SIZE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.FsMaxUploadSize != 512<<20 {
+		t.Fatalf("default = %d", cfg.FsMaxUploadSize)
+	}
+	t.Setenv("VIBE_FS_MAX_UPLOAD_SIZE", "1048576")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("load with env: %v", err)
+	}
+	if cfg.FsMaxUploadSize != 1048576 {
+		t.Fatalf("env override = %d", cfg.FsMaxUploadSize)
+	}
+}
+
 func writeConfigFile(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

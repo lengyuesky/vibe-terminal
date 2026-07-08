@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -18,6 +19,7 @@ type Config struct {
 	AdminUsername   string
 	AdminPassword   string
 	SessionDuration time.Duration
+	FsMaxUploadSize int64
 }
 
 func FromEnv() Config {
@@ -40,13 +42,14 @@ func Load() (Config, error) {
 }
 
 type fileConfig struct {
-	Addr          string `yaml:"addr"`
-	DatabasePath  string `yaml:"database_path"`
-	OutputRoot    string `yaml:"output_root"`
-	WebDir        string `yaml:"web_dir"`
-	SessionSecret string `yaml:"session_secret"`
-	AdminUsername string `yaml:"admin_username"`
-	AdminPassword string `yaml:"admin_password"`
+	Addr            string `yaml:"addr"`
+	DatabasePath    string `yaml:"database_path"`
+	OutputRoot      string `yaml:"output_root"`
+	WebDir          string `yaml:"web_dir"`
+	SessionSecret   string `yaml:"session_secret"`
+	AdminUsername   string `yaml:"admin_username"`
+	AdminPassword   string `yaml:"admin_password"`
+	FsMaxUploadSize int64  `yaml:"fs_max_upload_size"`
 }
 
 func defaultConfig() Config {
@@ -57,6 +60,7 @@ func defaultConfig() Config {
 		WebDir:          "web/dist",
 		SessionSecret:   []byte("dev-session-secret-32-bytes-long"),
 		SessionDuration: 24 * time.Hour,
+		FsMaxUploadSize: 512 << 20,
 	}
 }
 
@@ -96,6 +100,9 @@ func applyFile(cfg *Config, file fileConfig) {
 	if file.AdminPassword != "" {
 		cfg.AdminPassword = file.AdminPassword
 	}
+	if file.FsMaxUploadSize > 0 {
+		cfg.FsMaxUploadSize = file.FsMaxUploadSize
+	}
 }
 
 func applyEnv(cfg *Config) {
@@ -119,5 +126,10 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("VIBE_ADMIN_PASSWORD"); value != "" {
 		cfg.AdminPassword = value
+	}
+	if value := os.Getenv("VIBE_FS_MAX_UPLOAD_SIZE"); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
+			cfg.FsMaxUploadSize = parsed
+		}
 	}
 }

@@ -120,6 +120,7 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
       searchAddonRef.current = search;
       terminal.attachCustomKeyEventHandler((event) => {
         if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+          event.preventDefault();
           setSearchOpen(true);
           return false;
         }

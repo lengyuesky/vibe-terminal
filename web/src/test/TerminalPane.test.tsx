@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,7 @@ const terminalState = vi.hoisted(() => ({
     write: ReturnType<typeof vi.fn>;
     writeln: ReturnType<typeof vi.fn>;
     emitData: (data: string) => void;
+    attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
     dispose: ReturnType<typeof vi.fn>;
   }>,
 }));
@@ -297,5 +298,21 @@ describe('TerminalPane', () => {
     expect(addon?.findNext).toHaveBeenCalledWith('panic', expect.objectContaining({ caseSensitive: false }));
     await userEvent.type(input, '{Escape}');
     expect(addon?.clearDecorations).toHaveBeenCalled();
+  });
+
+  it('opens search and prevents the native find dialog on Ctrl+F', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+    render(<TerminalPane sessionId="sess-1" readOnly={false} />);
+    const handler = terminalState.instances[0].attachCustomKeyEventHandler.mock.calls[0]?.[0] as (
+      event: { type: string; ctrlKey: boolean; metaKey: boolean; key: string; preventDefault: () => void },
+    ) => boolean;
+    const preventDefault = vi.fn();
+    let result = true;
+    act(() => {
+      result = handler({ type: 'keydown', ctrlKey: true, metaKey: false, key: 'f', preventDefault });
+    });
+    expect(result).toBe(false);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(screen.getByLabelText('Search terminal')).toBeInTheDocument();
   });
 });

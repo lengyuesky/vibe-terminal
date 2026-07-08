@@ -145,9 +145,10 @@ pub fn read_chunk(raw_path: &str, offset: u64, length: u32) -> Result<FsReadResu
     }
     let path = resolve_path(raw_path)?;
     let meta = fs::metadata(&path).map_err(|e| io_error(&path, e))?;
-    if meta.is_dir() {
+    // FIFO 只读打开会阻塞控制循环，设备文件永远读不到 EOF，只允许常规文件。
+    if !meta.is_file() {
         return Err(FsOpError::NotAFile(format!(
-            "{} is a directory",
+            "{} is not a regular file",
             path.display()
         )));
     }
@@ -177,11 +178,20 @@ pub fn read_chunk(raw_path: &str, offset: u64, length: u32) -> Result<FsReadResu
 }
 
 struct Upload {
-    file: File,
+    file: Option<File>,
     tmp_path: PathBuf,
     target: PathBuf,
     written: u64,
     last_activity: Instant,
+}
+
+// 断线导致 UploadManager 被 drop 时清理残留临时文件;
+// close 成功后 tmp 已 rename,删除失败忽略,天然幂等。
+impl Drop for Upload {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = fs::remove_file(&self.tmp_path);
+    }
 }
 
 pub struct UploadManager {
@@ -241,7 +251,7 @@ impl UploadManager {
         self.uploads.insert(
             upload_id.to_string(),
             Upload {
-                file,
+                file: Some(file),
                 tmp_path,
                 target,
                 written: 0,
@@ -266,7 +276,12 @@ impl UploadManager {
                     "unexpected offset {offset}, expected {}",
                     upload.written
                 )))
-            } else if let Err(err) = upload.file.write_all(data) {
+            } else if let Err(err) = upload
+                .file
+                .as_mut()
+                .expect("upload file open until drop")
+                .write_all(data)
+            {
                 Err(FsOpError::Io(format!(
                     "{}: {}",
                     upload.tmp_path.display(),
@@ -285,35 +300,33 @@ impl UploadManager {
     }
 
     pub fn close(&mut self, upload_id: &str, total_size: u64) -> Result<(), FsOpError> {
-        let Some(upload) = self.uploads.remove(upload_id) else {
-            return Err(FsOpError::NotFound(format!("upload {upload_id} not found")));
+        // 出错路径直接返回,由 Drop 清理临时文件。
+        let mut upload = match self.uploads.remove(upload_id) {
+            Some(upload) => upload,
+            None => {
+                return Err(FsOpError::NotFound(format!("upload {upload_id} not found")));
+            }
         };
         if upload.written != total_size {
-            let _ = fs::remove_file(&upload.tmp_path);
             return Err(FsOpError::InvalidRequest(format!(
                 "size mismatch: wrote {}, expected {total_size}",
                 upload.written
             )));
         }
-        if let Err(err) = upload.file.sync_all() {
-            let code = io_error(&upload.tmp_path, err);
-            let _ = fs::remove_file(&upload.tmp_path);
-            return Err(code);
+        if let Some(file) = upload.file.take() {
+            if let Err(err) = file.sync_all() {
+                return Err(io_error(&upload.tmp_path, err));
+            }
         }
-        drop(upload.file);
         if let Err(err) = fs::rename(&upload.tmp_path, &upload.target) {
-            let code = io_error(&upload.target, err);
-            let _ = fs::remove_file(&upload.tmp_path);
-            return Err(code);
+            return Err(io_error(&upload.target, err));
         }
         Ok(())
     }
 
     pub fn abort(&mut self, upload_id: &str) {
-        if let Some(upload) = self.uploads.remove(upload_id) {
-            drop(upload.file);
-            let _ = fs::remove_file(&upload.tmp_path);
-        }
+        // Drop 负责删除临时文件。
+        self.uploads.remove(upload_id);
     }
 
     pub fn cleanup_stale(&mut self, max_age: Duration) -> usize {
@@ -451,6 +464,21 @@ mod tests {
         assert_eq!(err.code(), "not_a_file");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn read_chunk_on_fifo_is_not_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success());
+        // FIFO 上的只读 open 会阻塞;必须在 open 之前被拒绝
+        let err = read_chunk(fifo.to_str().unwrap(), 0, 4).unwrap_err();
+        assert_eq!(err.code(), "not_a_file");
+    }
+
     #[test]
     fn upload_full_cycle_renames_into_place() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -518,6 +546,23 @@ mod tests {
         assert_eq!(uploads.cleanup_stale(Duration::from_secs(3600)), 0);
         assert_eq!(uploads.cleanup_stale(Duration::ZERO), 1);
         assert!(!dir.path().join(".vibe-upload-up-5.tmp").exists());
+    }
+
+    #[test]
+    fn dropping_manager_removes_pending_tmp_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("pending.bin");
+        let mut uploads = UploadManager::new();
+        uploads
+            .open("up-6", target.to_str().unwrap(), false)
+            .expect("open");
+        uploads.write_chunk("up-6", 0, b"abc").expect("chunk");
+        let tmp = dir.path().join(".vibe-upload-up-6.tmp");
+        assert!(tmp.exists());
+        // 模拟 agent 断线:控制循环退出、manager 被 drop
+        drop(uploads);
+        assert!(!tmp.exists());
+        assert!(!target.exists());
     }
 
     #[test]

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowUp, Download, File as FileIcon, Folder, RefreshCw, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
+import { ArrowUp, Download, File as FileIcon, Folder, RefreshCw, Upload, X } from 'lucide-react';
 import type { Device, FsEntry } from '../api';
 import * as api from '../api';
 
@@ -45,6 +46,8 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(
     async (target: string) => {
@@ -74,6 +77,36 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
+  }
+
+  async function uploadFile(file: File, overwrite: boolean) {
+    setUploadProgress(0);
+    setError(null);
+    try {
+      await api.uploadDeviceFile(device.id, joinPath(path, file.name), file, {
+        overwrite,
+        onProgress: setUploadProgress,
+      });
+      setUploadProgress(null);
+      await load(path);
+    } catch (err) {
+      setUploadProgress(null);
+      if (err instanceof api.UploadError && err.status === 409 && !overwrite) {
+        if (window.confirm(`${file.name} already exists. Overwrite?`)) {
+          await uploadFile(file, true);
+        }
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Upload failed');
+    }
+  }
+
+  function handleFileChosen(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) {
+      void uploadFile(file, false);
+    }
   }
 
   return (
@@ -120,7 +153,28 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
           >
             <RefreshCw aria-hidden="true" size={14} />
           </button>
+          <button
+            className="iconButton"
+            type="button"
+            aria-label="Upload"
+            disabled={loading || uploadProgress !== null}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload aria-hidden="true" size={14} />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            aria-label="Upload file"
+            className="fileUploadInput"
+            onChange={handleFileChosen}
+          />
         </div>
+        {uploadProgress !== null && (
+          <div className="fileUploadProgress" role="progressbar" aria-valuenow={uploadProgress} aria-valuemin={0} aria-valuemax={100}>
+            <div className="fileUploadProgressFill" style={{ width: `${uploadProgress}%` }} />
+          </div>
+        )}
         {error && (
           <div className="filePanelError" role="alert">
             {error}

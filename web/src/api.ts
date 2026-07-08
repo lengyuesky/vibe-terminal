@@ -138,3 +138,40 @@ export function listDeviceFiles(deviceId: string, path: string): Promise<FsListi
 export function deviceFileURL(deviceId: string, path: string): string {
   return `/api/devices/${deviceId}/fs/file?path=${encodeURIComponent(path)}`;
 }
+
+export class UploadError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message || `upload failed with status ${status}`);
+    this.status = status;
+  }
+}
+
+export function uploadDeviceFile(
+  deviceId: string,
+  filePath: string,
+  file: Blob,
+  options: { overwrite?: boolean; onProgress?: (percent: number) => void } = {}
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const overwrite = options.overwrite ? '&overwrite=true' : '';
+    xhr.open('POST', `/api/devices/${deviceId}/fs/file?path=${encodeURIComponent(filePath)}${overwrite}`);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        options.onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new UploadError(xhr.status, `${xhr.status} ${xhr.responseText}`));
+      }
+    };
+    xhr.onerror = () => reject(new UploadError(0, 'network error'));
+    xhr.send(file);
+  });
+}

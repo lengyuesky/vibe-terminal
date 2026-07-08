@@ -1197,6 +1197,30 @@ button.fileName:hover {
   font-size: 13px;
 }
 
+.fileUploadInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.fileUploadProgress {
+  height: 4px;
+  margin: 10px 16px 0;
+  border-radius: var(--r-pill);
+  background: var(--glass-bg);
+  overflow: hidden;
+}
+
+.fileUploadProgressFill {
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent-grad);
+  transition: width 0.15s ease;
+}
+
 @media (max-width: 720px) {
   .fileRow {
     grid-template-columns: minmax(0, 1fr) 80px 40px;

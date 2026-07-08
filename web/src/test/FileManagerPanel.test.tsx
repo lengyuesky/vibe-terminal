@@ -77,6 +77,44 @@ describe('FileManagerPanel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('503 agent offline');
   });
 
+  it('uploads a chosen file into the current directory and reloads', async () => {
+    mockedApi.listDeviceFiles.mockResolvedValue({ path: '/home/dev', entries: [] });
+    mockedApi.uploadDeviceFile.mockResolvedValueOnce(undefined);
+    render(<FileManagerPanel device={device} onClose={vi.fn()} />);
+    await screen.findByText('Empty directory');
+    const input = screen.getByLabelText('Upload file') as HTMLInputElement;
+    await userEvent.upload(input, new File(['data'], 'report.pdf'));
+    await waitFor(() =>
+      expect(mockedApi.uploadDeviceFile).toHaveBeenCalledWith(
+        'dev-1',
+        '/home/dev/report.pdf',
+        expect.any(File),
+        expect.objectContaining({ overwrite: false })
+      )
+    );
+    await waitFor(() => expect(mockedApi.listDeviceFiles).toHaveBeenCalledTimes(2));
+  });
+
+  it('asks before overwriting on 409 and retries with overwrite', async () => {
+    mockedApi.listDeviceFiles.mockResolvedValue({ path: '/home/dev', entries: [] });
+    mockedApi.uploadDeviceFile
+      .mockRejectedValueOnce(new api.UploadError(409, 'already exists'))
+      .mockResolvedValueOnce(undefined);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<FileManagerPanel device={device} onClose={vi.fn()} />);
+    await screen.findByText('Empty directory');
+    const input = screen.getByLabelText('Upload file') as HTMLInputElement;
+    await userEvent.upload(input, new File(['data'], 'report.pdf'));
+    await waitFor(() => expect(mockedApi.uploadDeviceFile).toHaveBeenCalledTimes(2));
+    expect(mockedApi.uploadDeviceFile).toHaveBeenLastCalledWith(
+      'dev-1',
+      '/home/dev/report.pdf',
+      expect.any(File),
+      expect.objectContaining({ overwrite: true })
+    );
+    confirmSpy.mockRestore();
+  });
+
   it('closes via the close button', async () => {
     mockedApi.listDeviceFiles.mockResolvedValueOnce({ path: '/', entries: [] });
     const onClose = vi.fn();

@@ -144,6 +144,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                         send_payload(
                             &mut write,
                             "session_started",
+                            None,
                             Some(&session_id),
                             SessionStarted {
                                 session_id: session_id.clone(),
@@ -170,6 +171,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                         send_payload(
                             &mut write,
                             "session_exit",
+                            None,
                             Some(&session_id),
                             SessionExit {
                                 session_id: session_id.clone(),
@@ -187,6 +189,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     send_payload(
                         &mut write,
                         "stdout",
+                        None,
                         Some(&frame.session_id),
                         Stdout {
                             session_id: frame.session_id.clone(),
@@ -201,6 +204,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     send_payload(
                         &mut write,
                         "session_exit",
+                        None,
                         Some(&session_id),
                         SessionExit {
                             session_id: session_id.clone(),
@@ -293,6 +297,7 @@ fn agent_ws_url(server_url: &str) -> String {
 async fn send_payload<S, T>(
     write: &mut S,
     message_type: &str,
+    request_id: Option<&str>,
     session_id: Option<&str>,
     payload: T,
 ) -> Result<()>
@@ -303,6 +308,7 @@ where
 {
     let envelope = serde_json::json!({
         "type": message_type,
+        "request_id": request_id,
         "session_id": session_id,
         "payload": payload,
     });

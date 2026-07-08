@@ -4,6 +4,7 @@ import type { AgentToken, CreatedAgentToken, Device, Session, User } from './api
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
 import { DeviceList } from './components/DeviceList';
+import { FileManagerPanel } from './components/FileManagerPanel';
 import { LoginView } from './components/LoginView';
 import { TerminalTabs } from './components/TerminalTabs';
 
@@ -204,6 +205,7 @@ export function AppView({
   const [localDevices, setLocalDevices] = useState<Device[]>(devices);
   const [localSessions, setLocalSessions] = useState<Session[]>(initialSessions);
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
+  const [filesDevice, setFilesDevice] = useState<Device | null>(null);
 
   useEffect(() => {
     setLocalDevices(devices);
@@ -254,7 +256,13 @@ export function AppView({
             Agent Tokens
           </button>
         </nav>
-        <DeviceList devices={localDevices} onCreateSession={createAndAppend} onRenameDevice={renameDeviceAndApply} compact />
+        <DeviceList
+          devices={localDevices}
+          onCreateSession={createAndAppend}
+          onRenameDevice={renameDeviceAndApply}
+          onOpenFiles={setFilesDevice}
+          compact
+        />
       </aside>
       {viewMode === 'terminals' ? (
         <TerminalTabs
@@ -275,6 +283,7 @@ export function AppView({
           onRefresh={onRefreshAgentTokens}
         />
       )}
+      {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}
     </div>
   );
 }

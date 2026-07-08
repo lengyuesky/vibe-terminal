@@ -1,17 +1,19 @@
 import type { FormEvent } from 'react';
 import { useState } from 'react';
-import { Check, Pencil, Terminal, X } from 'lucide-react';
+import { Check, FolderOpen, Pencil, Terminal, X } from 'lucide-react';
 import type { Device } from '../api';
 
 export function DeviceList({
   devices,
   onCreateSession,
   onRenameDevice,
+  onOpenFiles,
   compact = false,
 }: {
   devices: Device[];
   onCreateSession: (deviceId: string) => Promise<void>;
   onRenameDevice?: (deviceId: string, name: string) => Promise<void>;
+  onOpenFiles?: (device: Device) => void;
   compact?: boolean;
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -91,6 +93,17 @@ export function DeviceList({
                   onClick={() => startRename(device)}
                 >
                   <Pencil aria-hidden="true" size={14} />
+                </button>
+              )}
+              {onOpenFiles && (
+                <button
+                  className="iconButton"
+                  type="button"
+                  aria-label={`Browse files on ${device.name}`}
+                  disabled={!device.online || isPending}
+                  onClick={() => onOpenFiles(device)}
+                >
+                  <FolderOpen aria-hidden="true" size={14} />
                 </button>
               )}
               <button disabled={!device.online || isPending} onClick={() => onCreateSession(device.id)}>

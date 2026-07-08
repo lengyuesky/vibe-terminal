@@ -9,6 +9,9 @@ vi.mock('../api', () => ({
   createAgentToken: vi.fn(),
   createSession: vi.fn(),
   deleteAgentToken: vi.fn(),
+  listDeviceFiles: vi.fn(),
+  deviceFileURL: vi.fn(() => ''),
+  uploadDeviceFile: vi.fn(),
   listDevices: vi.fn(),
   listAgentTokens: vi.fn(),
   listSessionOutput: vi.fn(),
@@ -399,6 +402,30 @@ describe('AppView', () => {
     expect(revokeToken).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: /confirm/i }));
     expect(revokeToken).toHaveBeenCalledWith('tok-1');
+  });
+
+  it('opens the file manager from the device list', async () => {
+    mockedApi.listDeviceFiles.mockResolvedValue({ path: '/home/dev', entries: [] });
+    render(
+      <AppView
+        user={{ id: 'user-1', username: 'admin' }}
+        devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
+        sessions={{}}
+        onLogin={vi.fn()}
+        onCloseSession={vi.fn()}
+        onCreateSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        agentTokens={[]}
+        createdAgentToken={null}
+        tokenLoading={false}
+        tokenError={null}
+        onCreateAgentToken={vi.fn()}
+        onRevokeAgentToken={vi.fn()}
+        onRefreshAgentTokens={vi.fn()}
+      />
+    );
+    await userEvent.click(screen.getByRole('button', { name: /browse files on laptop/i }));
+    expect(await screen.findByRole('dialog', { name: /files on laptop/i })).toBeInTheDocument();
   });
 
   it('permanently deletes revoked agent tokens after confirmation', async () => {

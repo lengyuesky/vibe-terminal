@@ -121,3 +121,20 @@ export function renameSession(sessionId: string, title: string): Promise<Session
     body: JSON.stringify({ title }),
   });
 }
+
+export type FsEntry = {
+  name: string;
+  is_dir: boolean;
+  size: number;
+  mode: number;
+  modified_at: number;
+};
+export type FsListing = { path: string; entries: FsEntry[] | null };
+
+export function listDeviceFiles(deviceId: string, path: string): Promise<FsListing> {
+  return request<FsListing>(`/api/devices/${deviceId}/fs?path=${encodeURIComponent(path)}`);
+}
+
+export function deviceFileURL(deviceId: string, path: string): string {
+  return `/api/devices/${deviceId}/fs/file?path=${encodeURIComponent(path)}`;
+}

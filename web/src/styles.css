@@ -1230,3 +1230,39 @@ button.fileName:hover {
     display: none;
   }
 }
+
+/* 终端搜索 */
+.terminalPaneTools {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 5;
+}
+
+.terminalSearchBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border-strong);
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+}
+
+.terminalSearchBar input {
+  width: 180px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.searchCaseActive {
+  color: var(--accent);
+  border-color: var(--accent);
+}

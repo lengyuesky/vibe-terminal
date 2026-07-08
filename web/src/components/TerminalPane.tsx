@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
+import { SearchAddon } from 'xterm-addon-search';
+import { Search } from 'lucide-react';
 import 'xterm/css/xterm.css';
 import * as api from '../api';
 import { encodeResize, encodeStdin, encodeSubscribe, webSocketURL, type TerminalEvent } from '../ws';
+import { TerminalSearchBar, type SearchQuery } from './TerminalSearchBar';
 
 type TerminalPaneProps = {
   sessionId: string;
@@ -14,6 +17,8 @@ type TerminalPaneProps = {
 export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: TerminalPaneProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -76,6 +81,7 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
 
     try {
       terminal = new Terminal({
+        allowProposedApi: true,
         cursorBlink: !readOnly,
         disableStdin: readOnly,
         convertEol: true,
@@ -109,6 +115,16 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
       });
       const fit = new FitAddon();
       terminal.loadAddon(fit);
+      const search = new SearchAddon();
+      terminal.loadAddon(search);
+      searchAddonRef.current = search;
+      terminal.attachCustomKeyEventHandler((event) => {
+        if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+          setSearchOpen(true);
+          return false;
+        }
+        return true;
+      });
       terminal.open(ref.current);
       fit.fit();
       if (typeof ResizeObserver !== 'undefined') {
@@ -175,12 +191,51 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
       cancelled = true;
       resizeObserver?.disconnect();
       socket?.close();
+      searchAddonRef.current = null;
       terminal?.dispose();
     };
   }, [sessionId, readOnly, onSessionStateChange]);
 
+  function runSearch(query: SearchQuery, direction: 'next' | 'previous') {
+    const addon = searchAddonRef.current;
+    if (!addon || !query.term) return;
+    const options = {
+      caseSensitive: query.caseSensitive,
+      decorations: {
+        matchBackground: '#4c3a78',
+        matchOverviewRuler: '#a78bfa',
+        activeMatchBackground: '#7c5cbf',
+        activeMatchColorOverviewRuler: '#c4b5fd',
+      },
+    };
+    if (direction === 'next') {
+      addon.findNext(query.term, options);
+    } else {
+      addon.findPrevious(query.term, options);
+    }
+  }
+
+  function closeSearch() {
+    searchAddonRef.current?.clearDecorations();
+    setSearchOpen(false);
+  }
+
   return (
     <div className="terminalPaneShell">
+      <div className="terminalPaneTools">
+        {searchOpen ? (
+          <TerminalSearchBar onSearch={runSearch} onClose={closeSearch} />
+        ) : (
+          <button
+            className="iconButton"
+            type="button"
+            aria-label="Search terminal output"
+            onClick={() => setSearchOpen(true)}
+          >
+            <Search aria-hidden="true" size={14} />
+          </button>
+        )}
+      </div>
       {connectionMessage && (
         <div className="terminalStatus" role="status">
           {connectionMessage}

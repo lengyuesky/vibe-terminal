@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
@@ -21,6 +22,14 @@ const webSocketState = vi.hoisted(() => ({
     close: ReturnType<typeof vi.fn>;
     addEventListener: ReturnType<typeof vi.fn>;
     emit: (type: string, event?: unknown) => void;
+  }>,
+}));
+
+const searchAddonState = vi.hoisted(() => ({
+  instances: [] as Array<{
+    findNext: ReturnType<typeof vi.fn>;
+    findPrevious: ReturnType<typeof vi.fn>;
+    clearDecorations: ReturnType<typeof vi.fn>;
   }>,
 }));
 
@@ -56,6 +65,7 @@ vi.mock('xterm', () => ({
         return { dispose: vi.fn() };
       }),
       emitData: (data: string) => dataHandlers.forEach((handler) => handler(data)),
+      attachCustomKeyEventHandler: vi.fn(),
       dispose: vi.fn(),
     };
     terminalState.instances.push(terminal);
@@ -69,11 +79,24 @@ vi.mock('xterm-addon-fit', () => ({
   }),
 }));
 
+vi.mock('xterm-addon-search', () => ({
+  SearchAddon: vi.fn().mockImplementation(function () {
+    const instance = {
+      findNext: vi.fn(),
+      findPrevious: vi.fn(),
+      clearDecorations: vi.fn(),
+    };
+    searchAddonState.instances.push(instance);
+    return instance;
+  }),
+}));
+
 const mockedApi = vi.mocked(api);
 
 beforeEach(() => {
   terminalState.instances.length = 0;
   webSocketState.instances.length = 0;
+  searchAddonState.instances.length = 0;
   resizeObserverState.instances.length = 0;
   class FakeWebSocket {
     static OPEN = 1;
@@ -262,5 +285,17 @@ describe('TerminalPane', () => {
     });
 
     expect(await screen.findByRole('status')).toHaveTextContent('agent disconnected');
+  });
+
+  it('opens search from the toolbar button and forwards queries to the addon', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+    render(<TerminalPane sessionId="sess-1" readOnly={false} />);
+    await userEvent.click(screen.getByRole('button', { name: /search terminal output/i }));
+    const input = screen.getByLabelText('Search terminal');
+    await userEvent.type(input, 'panic{Enter}');
+    const addon = searchAddonState.instances[searchAddonState.instances.length - 1];
+    expect(addon?.findNext).toHaveBeenCalledWith('panic', expect.objectContaining({ caseSensitive: false }));
+    await userEvent.type(input, '{Escape}');
+    expect(addon?.clearDecorations).toHaveBeenCalled();
   });
 });

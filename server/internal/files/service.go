@@ -173,7 +173,13 @@ func (s *Service) Upload(ctx context.Context, deviceID string, path string, size
 			return readErr
 		}
 	}
-	closeEnv, err := s.roundTrip(ctx, deviceID, protocol.TypeFsWriteClose, protocol.FsWriteClose{UploadID: uploadID, TotalSize: offset})
+	// 客户端中断时 body 短于 Content-Length，同样表现为 ErrUnexpectedEOF；
+	// 以声明大小关闭让 agent 的 size 校验失败并清理临时文件，不能提交截断文件。
+	if offset != size {
+		_, _ = s.roundTrip(ctx, deviceID, protocol.TypeFsWriteClose, protocol.FsWriteClose{UploadID: uploadID, TotalSize: size})
+		return &OpError{Code: "invalid_request", Message: fmt.Sprintf("upload truncated: received %d bytes, expected %d", offset, size)}
+	}
+	closeEnv, err := s.roundTrip(ctx, deviceID, protocol.TypeFsWriteClose, protocol.FsWriteClose{UploadID: uploadID, TotalSize: size})
 	if err != nil {
 		return err
 	}

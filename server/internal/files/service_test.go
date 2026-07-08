@@ -154,6 +154,47 @@ func TestUploadSendsOpenChunksClose(t *testing.T) {
 	}
 }
 
+func TestUploadTruncatedBodyFails(t *testing.T) {
+	var closeTotals []int64
+	var success bool
+	svc, stop := newTestService(t, func(out wshub.Outbound) (string, any) {
+		switch out.Type {
+		case protocol.TypeFsWriteOpen:
+			req := out.Payload.(protocol.FsWriteOpen)
+			return protocol.TypeFsWriteOpened, protocol.FsWriteOpened{UploadID: req.UploadID}
+		case protocol.TypeFsWriteChunk:
+			req := out.Payload.(protocol.FsWriteChunk)
+			data, _ := base64.StdEncoding.DecodeString(req.Data)
+			return protocol.TypeFsWriteAck, protocol.FsWriteAck{UploadID: req.UploadID, Offset: req.Offset + int64(len(data))}
+		case protocol.TypeFsWriteClose:
+			req := out.Payload.(protocol.FsWriteClose)
+			closeTotals = append(closeTotals, req.TotalSize)
+			if req.TotalSize != 20 {
+				success = true
+				return protocol.TypeFsWriteResult, protocol.FsWriteResult{UploadID: req.UploadID}
+			}
+			return protocol.TypeFsError, protocol.FsError{Code: "invalid_request", Message: "size mismatch"}
+		}
+		return "", nil
+	})
+	defer stop()
+	svc.chunkSize = 5
+	// 声明 20 字节但实际只有 12 字节，模拟客户端中断上传。
+	err := svc.Upload(context.Background(), "dev-1", "/tmp/up.bin", 20, true, strings.NewReader("hello world!"))
+	opErr, ok := err.(*OpError)
+	if !ok || opErr.Code != "invalid_request" {
+		t.Fatalf("err = %v", err)
+	}
+	if success {
+		t.Fatal("truncated upload must not be committed")
+	}
+	for _, total := range closeTotals {
+		if total != 20 {
+			t.Fatalf("close total = %d, want declared size 20", total)
+		}
+	}
+}
+
 func TestTimeoutWhenAgentSilent(t *testing.T) {
 	svc, stop := newTestService(t, func(out wshub.Outbound) (string, any) { return "", nil })
 	defer stop()

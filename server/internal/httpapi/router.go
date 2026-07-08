@@ -801,6 +801,8 @@ func (r *router) handleAgentWebSocket(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	// fs_read_result 分块 base64 后约 350KB，超过默认 32KB 读上限会断开整个 agent 连接
+	conn.SetReadLimit(1 << 20)
 
 	ctx := req.Context()
 	_, data, err := conn.Read(ctx)
@@ -858,6 +860,8 @@ func (r *router) handleWebWebSocket(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	// 终端大段粘贴会产生超过默认 32KB 读上限的单条 stdin 消息
+	conn.SetReadLimit(1 << 20)
 
 	ctx := req.Context()
 	peer := &socketPeer{conn: conn}

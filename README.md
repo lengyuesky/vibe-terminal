@@ -15,6 +15,9 @@
 - 服务端重启后，agent 重连并同步本地记录的会话状态。
 - 终端输入、输出、窗口尺寸 resize 同步。
 - 会话删除确认、会话重命名、启动目录显示和状态颜色提示。
+- 设备文件管理器：浏览目录、下载文件、上传文件（带进度与覆盖确认）。
+- 终端输出搜索：Ctrl+F / Cmd+F 在回滚缓冲中查找并高亮。
+- 快捷命令片段：保存常用命令，点击注入当前会话（不自动回车）。
 - SQLite 保存设备、会话和审计元数据，终端输出落盘保存。
 - Docker Compose、systemd、launchd、WSL 示例配置。
 
@@ -145,8 +148,9 @@ cp config.example.yaml config.yaml
 | `session_secret` | 开发默认值 | Cookie 签名密钥，生产环境必须替换 |
 | `admin_username` | 空 | 启动时创建的管理员用户名 |
 | `admin_password` | 空 | 启动时创建的管理员密码 |
+| `fs_max_upload_size` | `536870912` | 上传单文件大小上限（字节） |
 
-服务端启动时会读取 `VIBE_CONFIG` 指向的 YAML 文件；未设置 `VIBE_CONFIG` 时仍使用默认值和环境变量。以下环境变量可覆盖 YAML 中的同名配置：`VIBE_ADDR`、`VIBE_DB`、`VIBE_OUTPUT_ROOT`、`VIBE_WEB_DIR`、`VIBE_SESSION_SECRET`、`VIBE_ADMIN_USER`、`VIBE_ADMIN_PASSWORD`。
+服务端启动时会读取 `VIBE_CONFIG` 指向的 YAML 文件；未设置 `VIBE_CONFIG` 时仍使用默认值和环境变量。以下环境变量可覆盖 YAML 中的同名配置：`VIBE_ADDR`、`VIBE_DB`、`VIBE_OUTPUT_ROOT`、`VIBE_WEB_DIR`、`VIBE_SESSION_SECRET`、`VIBE_ADMIN_USER`、`VIBE_ADMIN_PASSWORD`、`VIBE_FS_MAX_UPLOAD_SIZE`。
 
 agent 注册后会把设备 ID、服务端地址和凭据保存到用户配置目录。运行 `cargo run -- run` 时会读取该配置并连接服务端。
 
@@ -256,6 +260,19 @@ Release 附带以下 agent 可执行文件包：
 - `subscribe_session`
 - `session_state`
 - `error`
+- `fs_list`
+- `fs_list_result`
+- `fs_read`
+- `fs_read_result`
+- `fs_write_open`
+- `fs_write_opened`
+- `fs_write_chunk`
+- `fs_write_ack`
+- `fs_write_close`
+- `fs_write_result`
+- `fs_error`
+
+`agent_hello` 可携带 `capabilities` 字段声明 agent 能力，声明 `fs` 后服务端才会向该设备转发文件消息。
 
 ## 安全注意
 
@@ -271,6 +288,9 @@ Release 附带以下 agent 可执行文件包：
 - 被控机器重启或 agent 崩溃后，真实 PTY 进程无法恢复。
 - 会话目录显示的是启动目录，不是 shell 实时工作目录。
 - 当前不包含多节点部署、Kubernetes 示例或高可用方案。
+- 文件传输期间被控端文件被并发修改时，下载内容可能撕裂（无快照一致性）。
+- 终端搜索只作用于浏览器内的回滚缓冲，不搜索仅存于磁盘的历史输出。
+- 文件管理器不提供删除/重命名/新建目录，请在终端内完成。
 
 ## 许可证
 

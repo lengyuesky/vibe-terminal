@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { SearchAddon } from 'xterm-addon-search';
@@ -14,14 +14,22 @@ type TerminalPaneProps = {
   onSessionStateChange?: (sessionId: string, status: string, message?: string) => void;
 };
 
-export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: TerminalPaneProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
+export type TerminalPaneHandle = {
+  sendText: (text: string) => void;
+};
+
+export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane(
+  { sessionId, readOnly, onSessionStateChange },
+  ref
+) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchAddonRef = useRef<SearchAddon | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    if (!ref.current) return;
+    if (!containerRef.current) return;
     setConnectionMessage(null);
     let socket: WebSocket | null = null;
     let terminal: Terminal | null = null;
@@ -126,19 +134,20 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
         }
         return true;
       });
-      terminal.open(ref.current);
+      terminal.open(containerRef.current);
       fit.fit();
       if (typeof ResizeObserver !== 'undefined') {
         resizeObserver = new ResizeObserver(() => {
           fit.fit();
           sendResize();
         });
-        resizeObserver.observe(ref.current);
+        resizeObserver.observe(containerRef.current);
       }
       void restoreOutput();
 
       if (typeof WebSocket !== 'undefined') {
         socket = new WebSocket(webSocketURL());
+        socketRef.current = socket;
         socket.addEventListener('open', () => {
           socket?.send(encodeSubscribe(sessionId));
           sendResize();
@@ -185,17 +194,31 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
         });
       }
     } catch {
-      ref.current.textContent = `connected to ${sessionId}`;
+      containerRef.current.textContent = `connected to ${sessionId}`;
     }
 
     return () => {
       cancelled = true;
       resizeObserver?.disconnect();
+      socketRef.current = null;
       socket?.close();
       searchAddonRef.current = null;
       terminal?.dispose();
     };
   }, [sessionId, readOnly, onSessionStateChange]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      sendText(text: string) {
+        const socket = socketRef.current;
+        if (!readOnly && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(encodeStdin(sessionId, text));
+        }
+      },
+    }),
+    [sessionId, readOnly]
+  );
 
   function runSearch(query: SearchQuery, direction: 'next' | 'previous') {
     const addon = searchAddonRef.current;
@@ -242,7 +265,7 @@ export function TerminalPane({ sessionId, readOnly, onSessionStateChange }: Term
           {connectionMessage}
         </div>
       )}
-      <div className="terminalPane" ref={ref} />
+      <div className="terminalPane" ref={containerRef} />
     </div>
   );
-}
+});

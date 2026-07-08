@@ -175,3 +175,35 @@ export function uploadDeviceFile(
     xhr.send(file);
   });
 }
+
+export type Snippet = {
+  id: string;
+  name: string;
+  command: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export function listSnippets(): Promise<Snippet[]> {
+  return request<Snippet[]>('/api/snippets');
+}
+
+export function createSnippet(name: string, command: string): Promise<Snippet> {
+  return request<Snippet>('/api/snippets', {
+    method: 'POST',
+    body: JSON.stringify({ name, command }),
+  });
+}
+
+export function updateSnippet(id: string, name: string, command: string): Promise<Snippet> {
+  return request<Snippet>(`/api/snippets/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name, command }),
+  });
+}
+
+export function deleteSnippet(id: string): Promise<void> {
+  return request<void>(`/api/snippets/${id}`, {
+    method: 'DELETE',
+  });
+}

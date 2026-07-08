@@ -1,8 +1,9 @@
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Pencil, X } from 'lucide-react';
 import type { Session } from '../api';
-import { TerminalPane } from './TerminalPane';
+import { SnippetsBar } from './SnippetsBar';
+import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 
 type TerminalTabsProps = {
   sessions: Session[];
@@ -50,6 +51,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
   const [confirmingClose, setConfirmingClose] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
   const [pendingSession, setPendingSession] = useState<string | null>(null);
+  const paneRef = useRef<TerminalPaneHandle | null>(null);
   const visibleSessions = sessions.filter((session) => session.status !== 'closed');
 
   const handleSessionStateChange = useCallback(
@@ -249,8 +251,10 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
               .join(' · ')}
           </p>
         </div>
+        <SnippetsBar onInsert={(command) => paneRef.current?.sendText(command)} />
       </header>
       <TerminalPane
+        ref={paneRef}
         sessionId={activeSession.id}
         readOnly={activeSession.status === 'closed' || activeSession.status === 'exited' || activeSession.status === 'lost'}
         onSessionStateChange={handleSessionStateChange}

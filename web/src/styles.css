@@ -947,6 +947,8 @@ input:focus-visible {
   min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--glass-border);
   background: rgba(255, 255, 255, 0.03);
@@ -1265,4 +1267,122 @@ button.fileName:hover {
 .searchCaseActive {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* 快捷命令 */
+.snippetsBar {
+  position: relative;
+}
+
+.snippetsToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.snippetsToggle:hover {
+  color: var(--text);
+  border-color: var(--glass-border-strong);
+}
+
+.snippetsPopover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(420px, 90vw);
+  padding: 10px;
+  border-radius: var(--r-card);
+  border: 1px solid var(--glass-border-strong);
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+.snippetsList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.snippetRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.snippetInsert {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.snippetInsert:hover {
+  background: var(--glass-bg);
+}
+
+.snippetInsert strong {
+  font-size: 12px;
+}
+
+.snippetInsert code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.snippetForm {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.snippetForm input {
+  flex: 1;
+  min-width: 0;
+}
+
+.snippetsEmpty,
+.snippetsHint {
+  padding: 6px 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.snippetsHint {
+  margin: 6px 0 0;
+}
+
+.snippetsError {
+  padding: 6px 8px;
+  border-radius: var(--r-ctrl);
+  background: rgba(251, 113, 133, 0.12);
+  color: var(--danger);
+  font-size: 12px;
 }

@@ -16,6 +16,7 @@ vi.mock('../api', () => ({
   listAgentTokens: vi.fn(),
   listSessionOutput: vi.fn(),
   listSessions: vi.fn(),
+  listSnippets: vi.fn(() => Promise.resolve([])),
   login: vi.fn(),
   me: vi.fn(),
   revokeAgentToken: vi.fn(),

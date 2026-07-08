@@ -44,6 +44,7 @@ const resizeObserverState = vi.hoisted(() => ({
 
 vi.mock('../api', () => ({
   listSessionOutput: vi.fn(),
+  listSnippets: vi.fn(() => Promise.resolve([])),
 }));
 
 vi.mock('xterm', () => ({
@@ -314,5 +315,17 @@ describe('TerminalPane', () => {
     expect(result).toBe(false);
     expect(preventDefault).toHaveBeenCalled();
     expect(screen.getByLabelText('Search terminal')).toBeInTheDocument();
+  });
+
+  it('sends snippet text through the session socket via the imperative handle', async () => {
+    mockedApi.listSessionOutput.mockResolvedValue([]);
+    const ref = { current: null as null | { sendText: (text: string) => void } };
+    render(<TerminalPane ref={ref} sessionId="sess-1" readOnly={false} />);
+    await waitFor(() => expect(ref.current).not.toBeNull());
+    const socket = webSocketState.instances[webSocketState.instances.length - 1];
+    ref.current?.sendText('df -h');
+    expect(socket?.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: 'stdin', session_id: 'sess-1', payload: { session_id: 'sess-1', data: 'df -h' } })
+    );
   });
 });

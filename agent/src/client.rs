@@ -30,6 +30,7 @@ impl ClientState {
             "platform": std::env::consts::OS,
             "agent_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
+            "capabilities": ["fs"],
             "sessions": self.registry.list()
         });
         Ok(serde_json::json!({
@@ -106,6 +107,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
 
     let mut pty = PtyManager::new();
     let mut buffers: BTreeMap<String, OutputBuffer> = BTreeMap::new();
+    let mut uploads = crate::fs::UploadManager::new();
     let mut output_tick = time::interval(Duration::from_millis(30));
 
     loop {
@@ -181,7 +183,21 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                         )
                         .await?;
                     }
-                    _ => {}
+                    other => {
+                        let request_id = envelope.request_id.clone();
+                        if let Some((reply_type, reply_payload)) =
+                            crate::fs::handle_fs_message(&mut uploads, other, envelope.payload)
+                        {
+                            send_payload(
+                                &mut write,
+                                &reply_type,
+                                request_id.as_deref(),
+                                None,
+                                reply_payload,
+                            )
+                            .await?;
+                        }
+                    }
                 }
             }
             _ = output_tick.tick() => {
@@ -214,6 +230,7 @@ pub async fn run_control_loop(config: AgentConfig, mut registry: SessionRegistry
                     )
                     .await?;
                 }
+                uploads.cleanup_stale(Duration::from_secs(60));
             }
         }
     }
@@ -363,6 +380,22 @@ mod tests {
                 .any(|frame| frame.session_id == session.session_id && frame.data.contains('p')),
             "frames were {frames:?}"
         );
+    }
+
+    #[test]
+    fn agent_hello_declares_fs_capability() {
+        let state = ClientState {
+            config: AgentConfig {
+                server_url: "http://localhost:8080".into(),
+                device_id: "dev-1".into(),
+                credential: "cred".into(),
+                device_name: "test".into(),
+            },
+            registry: SessionRegistry::default(),
+        };
+        let hello = state.agent_hello_json().expect("hello");
+        let value: serde_json::Value = serde_json::from_str(&hello).expect("json");
+        assert_eq!(value["payload"]["capabilities"][0], "fs");
     }
 
     #[test]

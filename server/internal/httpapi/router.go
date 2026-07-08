@@ -103,6 +103,10 @@ func (r *router) routes() {
 	r.mux.HandleFunc("POST /api/agent-tokens", r.handleCreateAgentToken)
 	r.mux.HandleFunc("GET /api/agent-tokens", r.handleListAgentTokens)
 	r.mux.HandleFunc("DELETE /api/agent-tokens/", r.handleRevokeAgentToken)
+	r.mux.HandleFunc("GET /api/snippets", r.handleListSnippets)
+	r.mux.HandleFunc("POST /api/snippets", r.handleCreateSnippet)
+	r.mux.HandleFunc("PUT /api/snippets/", r.handleUpdateSnippet)
+	r.mux.HandleFunc("DELETE /api/snippets/", r.handleDeleteSnippet)
 	r.mux.HandleFunc("POST /api/agents/register", r.handleAgentRegister)
 	r.mux.HandleFunc("GET /api/devices", r.handleListDevices)
 	r.mux.HandleFunc("/api/devices/", r.handleDeviceRoutes)
@@ -295,6 +299,115 @@ func (r *router) handleDeleteRevokedAgentToken(w http.ResponseWriter, req *http.
 		EventType: "agent_token_deleted",
 		Summary:   "agent registration token permanently deleted",
 	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type snippetBody struct {
+	Name    string `json:"name"`
+	Command string `json:"command"`
+}
+
+func (b *snippetBody) normalize() bool {
+	b.Name = strings.TrimSpace(b.Name)
+	return b.Name != "" && strings.TrimSpace(b.Command) != ""
+}
+
+func snippetResponse(snippet store.CommandSnippet) map[string]string {
+	return map[string]string{
+		"id":         snippet.ID,
+		"name":       snippet.Name,
+		"command":    snippet.Command,
+		"created_at": snippet.CreatedAt.Format(time.RFC3339),
+		"updated_at": snippet.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func snippetIDFromPath(path string) string {
+	id := strings.TrimPrefix(path, "/api/snippets/")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func (r *router) handleListSnippets(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	snippets, err := r.store.ListCommandSnippets(req.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "snippet_error", "failed to list snippets")
+		return
+	}
+	out := make([]map[string]string, 0, len(snippets))
+	for _, snippet := range snippets {
+		out = append(out, snippetResponse(snippet))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (r *router) handleCreateSnippet(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	var body snippetBody
+	if !readJSON(w, req, &body) {
+		return
+	}
+	if !body.normalize() {
+		writeError(w, http.StatusBadRequest, "invalid_snippet", "name and command are required")
+		return
+	}
+	snippet, err := r.store.CreateCommandSnippet(req.Context(), store.CommandSnippet{
+		ID:      uuid.NewString(),
+		Name:    body.Name,
+		Command: body.Command,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "snippet_error", "failed to create snippet")
+		return
+	}
+	writeJSON(w, http.StatusCreated, snippetResponse(snippet))
+}
+
+func (r *router) handleUpdateSnippet(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	id := snippetIDFromPath(req.URL.Path)
+	if id == "" {
+		writeError(w, http.StatusNotFound, "not_found", "snippet not found")
+		return
+	}
+	var body snippetBody
+	if !readJSON(w, req, &body) {
+		return
+	}
+	if !body.normalize() {
+		writeError(w, http.StatusBadRequest, "invalid_snippet", "name and command are required")
+		return
+	}
+	snippet, err := r.store.UpdateCommandSnippet(req.Context(), id, body.Name, body.Command)
+	if err != nil {
+		writeStoreError(w, err, "snippet")
+		return
+	}
+	writeJSON(w, http.StatusOK, snippetResponse(snippet))
+}
+
+func (r *router) handleDeleteSnippet(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.requireUser(w, req); !ok {
+		return
+	}
+	id := snippetIDFromPath(req.URL.Path)
+	if id == "" {
+		writeError(w, http.StatusNotFound, "not_found", "snippet not found")
+		return
+	}
+	if err := r.store.DeleteCommandSnippet(req.Context(), id); err != nil {
+		writeStoreError(w, err, "snippet")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

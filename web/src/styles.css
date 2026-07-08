@@ -1249,6 +1249,7 @@ button.fileName:hover {
   border-radius: var(--r-ctrl);
   border: 1px solid var(--glass-border-strong);
   background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   box-shadow: var(--glass-shadow);
 }

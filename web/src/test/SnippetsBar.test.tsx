@@ -35,6 +35,19 @@ describe('SnippetsBar', () => {
     expect(screen.queryByRole('button', { name: /insert disk/i })).not.toBeInTheDocument();
   });
 
+  it('clears the load error after a successful reload', async () => {
+    mockedApi.listSnippets.mockRejectedValueOnce(new Error('network down'));
+    mockedApi.listSnippets.mockResolvedValueOnce([snippet]);
+    render(<SnippetsBar onInsert={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: /quick commands/i });
+    await userEvent.click(toggle);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load snippets.');
+    await userEvent.click(toggle);
+    await userEvent.click(toggle);
+    expect(await screen.findByRole('button', { name: /insert disk/i })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('creates a snippet from the form', async () => {
     mockedApi.listSnippets.mockResolvedValueOnce([]);
     mockedApi.createSnippet.mockResolvedValueOnce({ ...snippet, id: 'snip-2', name: 'uptime', command: 'uptime' });

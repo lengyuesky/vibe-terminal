@@ -19,7 +19,10 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
     api
       .listSnippets()
       .then((items) => {
-        if (!cancelled) setSnippets(items ?? []);
+        if (!cancelled) {
+          setSnippets(items ?? []);
+          setError(null);
+        }
       })
       .catch(() => {
         if (!cancelled) setError('Failed to load snippets.');

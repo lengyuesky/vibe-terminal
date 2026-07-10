@@ -342,6 +342,108 @@ func (db *DB) GetPendingTwoFactor(ctx context.Context, userID string, now time.T
 	return scanUserTwoFactor(row)
 }
 
+// EnableTwoFactor 原子启用待确认配置并保存新的恢复码。
+func (db *DB) EnableTwoFactor(ctx context.Context, userID, configurationID string, counter int64, codes []RecoveryCodeInput, now time.Time) error {
+	now = now.UTC()
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx,
+		`update user_two_factor
+		 set enabled_at = ?, setup_expires_at = null, last_totp_counter = ?, updated_at = ?
+		 where user_id = ? and configuration_id = ? and enabled_at is null and setup_expires_at > ?`,
+		now, counter, now, userID, configurationID, now)
+	if err := requireAffected(result, err, ErrConflict); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `delete from two_factor_recovery_codes where user_id = ?`, userID); err != nil {
+		return err
+	}
+	if err := insertRecoveryCodes(ctx, tx, userID, codes, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ConsumeTOTPCounter 原子推进 TOTP 计数器，拒绝重复或倒退的计数器。
+func (db *DB) ConsumeTOTPCounter(ctx context.Context, userID, configurationID string, counter int64, now time.Time) error {
+	now = now.UTC()
+	result, err := db.SQL.ExecContext(ctx,
+		`update user_two_factor set last_totp_counter = ?, updated_at = ?
+		 where user_id = ? and configuration_id = ? and enabled_at is not null
+		 and (last_totp_counter is null or last_totp_counter < ?)`,
+		counter, now, userID, configurationID, counter)
+	return requireAffected(result, err, ErrConflict)
+}
+
+// ConsumeRecoveryCode 原子标记一枚尚未使用的恢复码。
+func (db *DB) ConsumeRecoveryCode(ctx context.Context, userID, hash string, now time.Time) error {
+	now = now.UTC()
+	result, err := db.SQL.ExecContext(ctx,
+		`update two_factor_recovery_codes set used_at = ?
+		 where user_id = ? and code_hash = ? and used_at is null`,
+		now, userID, hash)
+	return requireAffected(result, err, ErrNotFound)
+}
+
+// CountRecoveryCodes 返回用户尚未使用的恢复码数量。
+func (db *DB) CountRecoveryCodes(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := db.SQL.QueryRowContext(ctx,
+		`select count(*) from two_factor_recovery_codes where user_id = ? and used_at is null`,
+		userID).Scan(&count)
+	return count, err
+}
+
+// ReplaceRecoveryCodesAfterTOTP 在消费新的 TOTP 计数器后原子轮换恢复码。
+func (db *DB) ReplaceRecoveryCodesAfterTOTP(ctx context.Context, userID, configurationID string, counter int64, codes []RecoveryCodeInput, now time.Time) error {
+	now = now.UTC()
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx,
+		`update user_two_factor set last_totp_counter = ?, updated_at = ?
+		 where user_id = ? and configuration_id = ? and enabled_at is not null
+		 and (last_totp_counter is null or last_totp_counter < ?)`,
+		counter, now, userID, configurationID, counter)
+	if err := requireAffected(result, err, ErrConflict); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `delete from two_factor_recovery_codes where user_id = ?`, userID); err != nil {
+		return err
+	}
+	if err := insertRecoveryCodes(ctx, tx, userID, codes, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DisableTwoFactor 原子删除已启用配置及其全部恢复码。
+func (db *DB) DisableTwoFactor(ctx context.Context, userID string) error {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `delete from two_factor_recovery_codes where user_id = ?`, userID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx,
+		`delete from user_two_factor where user_id = ? and enabled_at is not null`,
+		userID)
+	if err := requireAffected(result, err, ErrNotFound); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (db *DB) CreateAgentToken(ctx context.Context, params CreateAgentTokenParams) (AgentToken, error) {
 	token := AgentToken{
 		ID:        params.ID,
@@ -773,6 +875,33 @@ func scanTerminalSession(s scanner) (TerminalSession, error) {
 	err := s.Scan(&session.ID, &session.DeviceID, &session.Title, &session.ShellPath, &session.WorkingDirectory,
 		&session.Status, &session.AgentPID, &session.LastOutputSeq, &session.CreatedAt, &session.UpdatedAt)
 	return session, err
+}
+
+// insertRecoveryCodes 在同一事务中逐项写入恢复码。
+func insertRecoveryCodes(ctx context.Context, tx *sql.Tx, userID string, codes []RecoveryCodeInput, now time.Time) error {
+	for _, code := range codes {
+		if _, err := tx.ExecContext(ctx,
+			`insert into two_factor_recovery_codes (id, user_id, code_hash, created_at) values (?, ?, ?, ?)`,
+			code.ID, userID, code.Hash, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requireAffected 将条件写入未命中映射为调用方指定的错误。
+func requireAffected(result sql.Result, err error, emptyError error) error {
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return emptyError
+	}
+	return nil
 }
 
 func boolInt(value bool) int {

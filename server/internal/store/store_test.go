@@ -435,6 +435,568 @@ func TestPendingTwoFactorDoesNotReplaceEnabled(t *testing.T) {
 	}
 }
 
+func TestEnableTwoFactorAtomicallyEnablesPendingAndStoresRecoveryCodes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "enable-user", Username: "enable", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 16, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "enable-user",
+		ConfigurationID:  "enable-configuration",
+		SecretCiphertext: "enable-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`insert into two_factor_recovery_codes (id, user_id, code_hash, created_at) values (?, ?, ?, ?)`,
+		"old-enable-code", "enable-user", "old-enable-hash", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("insert old recovery code: %v", err)
+	}
+
+	err = db.EnableTwoFactor(ctx, "enable-user", "enable-configuration", 100, []RecoveryCodeInput{
+		{ID: "enable-code-1", Hash: "enable-hash-1"},
+		{ID: "enable-code-2", Hash: "enable-hash-2"},
+	}, now)
+	if err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	enabled, err := db.GetEnabledTwoFactor(ctx, "enable-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if enabled.SetupExpiresAt.Valid {
+		t.Fatalf("setup_expires_at = %#v, want null", enabled.SetupExpiresAt)
+	}
+	if !enabled.EnabledAt.Valid || !enabled.EnabledAt.Time.Equal(now) || enabled.EnabledAt.Time.Location() != time.UTC {
+		t.Fatalf("enabled_at = %#v, want UTC %s", enabled.EnabledAt, now.UTC())
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 100 {
+		t.Fatalf("last_totp_counter = %#v, want 100", enabled.LastTOTPCounter)
+	}
+	if !enabled.UpdatedAt.Equal(now) || enabled.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("updated_at = %s, want UTC %s", enabled.UpdatedAt, now.UTC())
+	}
+
+	var recoveryCount int
+	if err := db.SQL.QueryRowContext(ctx,
+		`select count(*) from two_factor_recovery_codes where user_id = ? and used_at is null`,
+		"enable-user").Scan(&recoveryCount); err != nil {
+		t.Fatalf("count recovery codes: %v", err)
+	}
+	if recoveryCount != 2 {
+		t.Fatalf("recovery code count = %d, want 2", recoveryCount)
+	}
+	var storedUserID string
+	var storedHash string
+	var storedCreatedAt time.Time
+	if err := db.SQL.QueryRowContext(ctx,
+		`select user_id, code_hash, created_at from two_factor_recovery_codes where id = ?`,
+		"enable-code-1").Scan(&storedUserID, &storedHash, &storedCreatedAt); err != nil {
+		t.Fatalf("query inserted recovery code: %v", err)
+	}
+	if storedUserID != "enable-user" || storedHash != "enable-hash-1" {
+		t.Fatalf("stored recovery code = user %q hash %q", storedUserID, storedHash)
+	}
+	if !storedCreatedAt.Equal(now) || storedCreatedAt.Location() != time.UTC {
+		t.Fatalf("recovery code created_at = %s, want UTC %s", storedCreatedAt, now.UTC())
+	}
+}
+
+func TestConsumeTOTPCounterRejectsReplay(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "totp-user", Username: "totp", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "totp-user",
+		ConfigurationID:  "totp-configuration",
+		SecretCiphertext: "totp-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "totp-user", "totp-configuration", 100, nil, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	consumedAt := now.Add(time.Minute).In(time.FixedZone("UTC+8", 8*60*60))
+	if err := db.ConsumeTOTPCounter(ctx, "totp-user", "totp-configuration", 101, consumedAt); err != nil {
+		t.Fatalf("consume TOTP counter: %v", err)
+	}
+	if err := db.ConsumeTOTPCounter(ctx, "totp-user", "totp-configuration", 101, consumedAt.Add(time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replay TOTP counter error = %v, want ErrConflict", err)
+	}
+
+	enabled, err := db.GetEnabledTwoFactor(ctx, "totp-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 101 {
+		t.Fatalf("last_totp_counter = %#v, want 101", enabled.LastTOTPCounter)
+	}
+	if !enabled.UpdatedAt.Equal(consumedAt) || enabled.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("updated_at = %s, want UTC %s", enabled.UpdatedAt, consumedAt.UTC())
+	}
+}
+
+func TestConsumeRecoveryCodeOnlyOnceAndCountsUnused(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "recovery-user", Username: "recovery", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "recovery-user",
+		ConfigurationID:  "recovery-configuration",
+		SecretCiphertext: "recovery-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "recovery-user", "recovery-configuration", 100, []RecoveryCodeInput{
+		{ID: "recovery-code-1", Hash: "recovery-hash-1"},
+		{ID: "recovery-code-2", Hash: "recovery-hash-2"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	usedAt := now.Add(time.Minute).In(time.FixedZone("UTC+8", 8*60*60))
+	if err := db.ConsumeRecoveryCode(ctx, "recovery-user", "recovery-hash-1", usedAt); err != nil {
+		t.Fatalf("consume recovery code: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "recovery-user", "recovery-hash-1", usedAt.Add(time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reuse recovery code error = %v, want ErrNotFound", err)
+	}
+	count, err := db.CountRecoveryCodes(ctx, "recovery-user")
+	if err != nil {
+		t.Fatalf("count recovery codes: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("unused recovery code count = %d, want 1", count)
+	}
+
+	var storedUsedAt sql.NullTime
+	if err := db.SQL.QueryRowContext(ctx,
+		`select used_at from two_factor_recovery_codes where user_id = ? and code_hash = ?`,
+		"recovery-user", "recovery-hash-1").Scan(&storedUsedAt); err != nil {
+		t.Fatalf("query used_at: %v", err)
+	}
+	if !storedUsedAt.Valid || !storedUsedAt.Time.Equal(usedAt) || storedUsedAt.Time.Location() != time.UTC {
+		t.Fatalf("used_at = %#v, want UTC %s", storedUsedAt, usedAt.UTC())
+	}
+}
+
+func TestReplaceRecoveryCodesAfterTOTPAtomicallyRotatesCodes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "rotate-user", Username: "rotate", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "rotate-user",
+		ConfigurationID:  "rotate-configuration",
+		SecretCiphertext: "rotate-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "rotate-user", "rotate-configuration", 100, []RecoveryCodeInput{
+		{ID: "old-code-1", Hash: "old-hash-1"},
+		{ID: "old-code-2", Hash: "old-hash-2"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+	if err := db.ConsumeTOTPCounter(ctx, "rotate-user", "rotate-configuration", 101, now.Add(time.Minute)); err != nil {
+		t.Fatalf("consume counter 101: %v", err)
+	}
+
+	replacedAt := now.Add(2 * time.Minute).In(time.FixedZone("UTC+8", 8*60*60))
+	if err := db.ReplaceRecoveryCodesAfterTOTP(ctx, "rotate-user", "rotate-configuration", 102, []RecoveryCodeInput{
+		{ID: "new-code-1", Hash: "new-hash-1"},
+	}, replacedAt); err != nil {
+		t.Fatalf("replace recovery codes: %v", err)
+	}
+
+	enabled, err := db.GetEnabledTwoFactor(ctx, "rotate-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 102 {
+		t.Fatalf("last_totp_counter = %#v, want 102", enabled.LastTOTPCounter)
+	}
+	if !enabled.UpdatedAt.Equal(replacedAt) || enabled.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("updated_at = %s, want UTC %s", enabled.UpdatedAt, replacedAt.UTC())
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "rotate-user", "old-hash-1", replacedAt.Add(time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consume old recovery code error = %v, want ErrNotFound", err)
+	}
+	count, err := db.CountRecoveryCodes(ctx, "rotate-user")
+	if err != nil {
+		t.Fatalf("count replacement recovery codes: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("replacement recovery code count = %d, want 1", count)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "rotate-user", "new-hash-1", replacedAt.Add(time.Second)); err != nil {
+		t.Fatalf("consume new recovery code: %v", err)
+	}
+}
+
+func TestDisableTwoFactorAtomicallyRemovesEnabledSettingAndRecoveryCodes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "disable-user", Username: "disable", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "disable-user",
+		ConfigurationID:  "disable-configuration",
+		SecretCiphertext: "disable-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "disable-user", "disable-configuration", 100, []RecoveryCodeInput{
+		{ID: "disable-code-1", Hash: "disable-hash-1"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	if err := db.DisableTwoFactor(ctx, "disable-user"); err != nil {
+		t.Fatalf("disable two factor: %v", err)
+	}
+	if _, err := db.GetEnabledTwoFactor(ctx, "disable-user"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get disabled two factor error = %v, want ErrNotFound", err)
+	}
+	count, err := db.CountRecoveryCodes(ctx, "disable-user")
+	if err != nil {
+		t.Fatalf("count recovery codes after disable: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("recovery code count after disable = %d, want 0", count)
+	}
+}
+
+func TestTwoFactorCredentialLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "lifecycle-user", Username: "lifecycle", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "lifecycle-user",
+		ConfigurationID:  "lifecycle-configuration",
+		SecretCiphertext: "lifecycle-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "lifecycle-user", "lifecycle-configuration", 100, []RecoveryCodeInput{
+		{ID: "lifecycle-code-1", Hash: "lifecycle-hash-1"},
+		{ID: "lifecycle-code-2", Hash: "lifecycle-hash-2"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+	enabled, err := db.GetEnabledTwoFactor(ctx, "lifecycle-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 100 {
+		t.Fatalf("initial last_totp_counter = %#v, want 100", enabled.LastTOTPCounter)
+	}
+
+	if err := db.ConsumeTOTPCounter(ctx, "lifecycle-user", "lifecycle-configuration", 101, now.Add(time.Minute)); err != nil {
+		t.Fatalf("consume counter 101: %v", err)
+	}
+	if err := db.ConsumeTOTPCounter(ctx, "lifecycle-user", "lifecycle-configuration", 101, now.Add(time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replay counter 101 error = %v, want ErrConflict", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "lifecycle-user", "lifecycle-hash-1", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("consume first recovery code: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "lifecycle-user", "lifecycle-hash-1", now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reuse first recovery code error = %v, want ErrNotFound", err)
+	}
+	count, err := db.CountRecoveryCodes(ctx, "lifecycle-user")
+	if err != nil {
+		t.Fatalf("count remaining recovery codes: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("remaining recovery code count = %d, want 1", count)
+	}
+
+	if err := db.ReplaceRecoveryCodesAfterTOTP(ctx, "lifecycle-user", "lifecycle-configuration", 102, []RecoveryCodeInput{
+		{ID: "lifecycle-new-code", Hash: "lifecycle-new-hash"},
+	}, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("replace recovery codes: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "lifecycle-user", "lifecycle-hash-2", now.Add(4*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consume old recovery code error = %v, want ErrNotFound", err)
+	}
+	count, err = db.CountRecoveryCodes(ctx, "lifecycle-user")
+	if err != nil {
+		t.Fatalf("count new recovery codes: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("new recovery code count = %d, want 1", count)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "lifecycle-user", "lifecycle-new-hash", now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("consume new recovery code: %v", err)
+	}
+
+	if err := db.DisableTwoFactor(ctx, "lifecycle-user"); err != nil {
+		t.Fatalf("disable two factor: %v", err)
+	}
+	if _, err := db.GetEnabledTwoFactor(ctx, "lifecycle-user"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get disabled two factor error = %v, want ErrNotFound", err)
+	}
+	count, err = db.CountRecoveryCodes(ctx, "lifecycle-user")
+	if err != nil {
+		t.Fatalf("count recovery codes after disable: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("recovery code count after disable = %d, want 0", count)
+	}
+}
+
+func TestEnableTwoFactorRejectsInvalidPendingWithoutWritingCodes(t *testing.T) {
+	for _, testCase := range []struct {
+		name            string
+		configurationID string
+		expiresOffset   time.Duration
+	}{
+		{name: "expired setup", configurationID: "valid-configuration", expiresOffset: -time.Second},
+		{name: "wrong configuration", configurationID: "wrong-configuration", expiresOffset: time.Minute},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer db.Close()
+			if err := db.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			if _, err := db.CreateUser(ctx, User{ID: "invalid-enable-user", Username: "invalid-enable", PasswordHash: "password-hash"}); err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+			now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+			if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+				UserID:           "invalid-enable-user",
+				ConfigurationID:  "valid-configuration",
+				SecretCiphertext: "invalid-enable-ciphertext",
+				SetupExpiresAt:   sql.NullTime{Time: now.Add(testCase.expiresOffset), Valid: true},
+			}); err != nil {
+				t.Fatalf("save pending two factor: %v", err)
+			}
+
+			err = db.EnableTwoFactor(ctx, "invalid-enable-user", testCase.configurationID, 100, []RecoveryCodeInput{
+				{ID: "must-not-be-written", Hash: "must-not-be-written"},
+			}, now)
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("enable invalid pending error = %v, want ErrConflict", err)
+			}
+			count, err := db.CountRecoveryCodes(ctx, "invalid-enable-user")
+			if err != nil {
+				t.Fatalf("count recovery codes: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("recovery code count = %d, want 0", count)
+			}
+		})
+	}
+}
+
+func TestReplaceRecoveryCodesReplayPreservesOldCodes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "replay-user", Username: "replay", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "replay-user",
+		ConfigurationID:  "replay-configuration",
+		SecretCiphertext: "replay-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "replay-user", "replay-configuration", 100, []RecoveryCodeInput{
+		{ID: "replay-old-code", Hash: "replay-old-hash"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	err = db.ReplaceRecoveryCodesAfterTOTP(ctx, "replay-user", "replay-configuration", 100, []RecoveryCodeInput{
+		{ID: "replay-new-code", Hash: "replay-new-hash"},
+	}, now.Add(time.Minute))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("replace with replayed counter error = %v, want ErrConflict", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "replay-user", "replay-old-hash", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("old recovery code was not preserved: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "replay-user", "replay-new-hash", now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consume uncommitted new recovery code error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReplaceRecoveryCodesInsertFailureRollsBackCounterAndCodes(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "insert-failure-user", Username: "insert-failure", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "insert-failure-user",
+		ConfigurationID:  "insert-failure-configuration",
+		SecretCiphertext: "insert-failure-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if err := db.EnableTwoFactor(ctx, "insert-failure-user", "insert-failure-configuration", 100, []RecoveryCodeInput{
+		{ID: "insert-failure-old-code", Hash: "insert-failure-old-hash"},
+	}, now); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	err = db.ReplaceRecoveryCodesAfterTOTP(ctx, "insert-failure-user", "insert-failure-configuration", 101, []RecoveryCodeInput{
+		{ID: "duplicate-code", Hash: "new-hash-1"},
+		{ID: "duplicate-code", Hash: "new-hash-2"},
+	}, now.Add(time.Minute))
+	if err == nil {
+		t.Fatal("replace recovery codes with duplicate IDs succeeded")
+	}
+	enabled, err := db.GetEnabledTwoFactor(ctx, "insert-failure-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 100 {
+		t.Fatalf("last_totp_counter after rollback = %#v, want 100", enabled.LastTOTPCounter)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "insert-failure-user", "insert-failure-old-hash", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("old recovery code was not restored: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, "insert-failure-user", "new-hash-1", now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consume rolled-back new recovery code error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDisableTwoFactorMissingEnabledRollsBackRecoveryDeletion(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "rollback-user", Username: "rollback", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "rollback-user",
+		ConfigurationID:  "rollback-configuration",
+		SecretCiphertext: "rollback-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Minute), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`insert into two_factor_recovery_codes (id, user_id, code_hash, created_at) values (?, ?, ?, ?)`,
+		"rollback-code", "rollback-user", "rollback-hash", now); err != nil {
+		t.Fatalf("insert recovery code: %v", err)
+	}
+
+	if err := db.DisableTwoFactor(ctx, "rollback-user"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disable missing enabled setting error = %v, want ErrNotFound", err)
+	}
+	count, err := db.CountRecoveryCodes(ctx, "rollback-user")
+	if err != nil {
+		t.Fatalf("count recovery codes after rollback: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("recovery code count after rollback = %d, want 1", count)
+	}
+	if _, err := db.GetPendingTwoFactor(ctx, "rollback-user", now); err != nil {
+		t.Fatalf("pending setting changed during rollback: %v", err)
+	}
+}
+
 func TestCreateAndUseAgentToken(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, ":memory:")

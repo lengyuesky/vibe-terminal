@@ -19,6 +19,24 @@ func TestFailureLimiterNormalizesNonPositiveCapacity(t *testing.T) {
 	}
 }
 
+func TestFailureLimiterPanicsForNonPositiveMaxFailures(t *testing.T) {
+	requirePanic(t, func() {
+		NewFailureLimiter(0, time.Hour, 15*time.Minute, 100, time.Now)
+	})
+}
+
+func TestFailureLimiterPanicsForNonPositiveWindow(t *testing.T) {
+	requirePanic(t, func() {
+		NewFailureLimiter(5, 0, 15*time.Minute, 100, time.Now)
+	})
+}
+
+func TestFailureLimiterPanicsForNonPositiveBlockDuration(t *testing.T) {
+	requirePanic(t, func() {
+		NewFailureLimiter(5, time.Hour, 0, 100, time.Now)
+	})
+}
+
 func TestFailureLimiterBlocksAtThreshold(t *testing.T) {
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
 	limiter := NewFailureLimiter(5, time.Hour, 15*time.Minute, 100, func() time.Time {
@@ -163,6 +181,34 @@ func TestFailureLimiterEvictsOldestEntryAtCapacity(t *testing.T) {
 	}
 }
 
+func TestFailureLimiterAllowRefreshesBlockedEntryLastSeen(t *testing.T) {
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+	limiter := NewFailureLimiter(1, time.Hour, time.Hour, 2, func() time.Time {
+		return now
+	})
+
+	limiter.RecordFailure("first")
+	now = now.Add(time.Minute)
+	limiter.RecordFailure("second")
+	now = now.Add(time.Minute)
+	allowed, _ := limiter.Allow("first")
+	if allowed {
+		t.Fatal("first 仍在阻塞期内，不应允许登录")
+	}
+	now = now.Add(time.Minute)
+	limiter.RecordFailure("third")
+
+	if _, ok := limiter.entries["first"]; !ok {
+		t.Fatal("刚通过 Allow 访问的 first 应被保留")
+	}
+	if _, ok := limiter.entries["second"]; ok {
+		t.Fatal("应淘汰 LastSeen 更早的 second")
+	}
+	if _, ok := limiter.entries["third"]; !ok {
+		t.Fatal("应保留新插入的 third")
+	}
+}
+
 func TestFailureLimiterEvictsStaleEntriesButKeepsActiveBlocks(t *testing.T) {
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
 	limiter := NewFailureLimiter(2, 30*time.Minute, 2*time.Hour, 10, func() time.Time {
@@ -184,4 +230,14 @@ func TestFailureLimiterEvictsStaleEntriesButKeepsActiveBlocks(t *testing.T) {
 	if _, ok := limiter.entries["fresh"]; !ok {
 		t.Fatal("应保留新插入的条目")
 	}
+}
+
+func requirePanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("期望发生 panic")
+		}
+	}()
+	fn()
 }

@@ -25,6 +25,15 @@ type FailureLimiter struct {
 
 // NewFailureLimiter 创建登录失败限流器。
 func NewFailureLimiter(maxFailures int, window, blockFor time.Duration, maxEntries int, now func() time.Time) *FailureLimiter {
+	if maxFailures <= 0 {
+		panic("最大失败次数必须大于零")
+	}
+	if window <= 0 {
+		panic("失败时间窗口必须大于零")
+	}
+	if blockFor <= 0 {
+		panic("阻塞时长必须大于零")
+	}
 	if maxEntries < 1 {
 		maxEntries = 1
 	}
@@ -53,12 +62,16 @@ func (l *FailureLimiter) Allow(key string) (bool, time.Duration) {
 		return true, 0
 	}
 	if now.Before(entry.BlockedUntil) {
+		entry.LastSeen = now
+		l.entries[key] = entry
 		return false, entry.BlockedUntil.Sub(now)
 	}
 	if !now.Before(entry.WindowStart.Add(l.window)) {
 		delete(l.entries, key)
 		return true, 0
 	}
+	entry.LastSeen = now
+	l.entries[key] = entry
 	return true, 0
 }
 

@@ -130,7 +130,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	dsn := path + separator + "_pragma=foreign_keys(1)"
+	dsn := path + separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

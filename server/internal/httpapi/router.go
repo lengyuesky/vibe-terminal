@@ -156,7 +156,11 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	user, err := r.store.GetUserByUsername(req.Context(), body.Username)
-	if err != nil || !auth.CheckPassword(user.PasswordHash, body.Password) {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "authentication_unavailable", "authentication is unavailable")
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) || !auth.CheckPassword(user.PasswordHash, body.Password) {
 		if blocked, retryAfter := r.passwordLimiter.RecordFailure(limitKey); blocked {
 			r.auditLoginRateLimit(req.Context(), user.ID, "password", ip)
 			writeRateLimit(w, retryAfter)
@@ -237,7 +241,7 @@ func writeRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
 		seconds = 1
 	}
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-	writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts")
+	writeError(w, http.StatusTooManyRequests, "too_many_attempts", "too many login attempts")
 }
 
 func (r *router) handleLogout(w http.ResponseWriter, req *http.Request) {

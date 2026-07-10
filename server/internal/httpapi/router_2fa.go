@@ -64,11 +64,11 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 	method, err := r.verifyLoginCode(req, setting, body.Code)
 	if errors.Is(err, errInvalidSecondFactor) {
 		if blocked, retryAfter := r.twoFactorLimiter.RecordFailure(limitKey); blocked {
-			r.auditLoginRateLimit(req.Context(), user.ID, "two_factor", ip)
+			r.auditLoginRateLimit(req.Context(), user.ID, "second_factor", ip)
 			writeRateLimit(w, retryAfter)
 			return
 		}
-		writeError(w, http.StatusUnauthorized, "invalid_second_factor", "invalid two factor code")
+		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
 		return
 	}
 	if err != nil {

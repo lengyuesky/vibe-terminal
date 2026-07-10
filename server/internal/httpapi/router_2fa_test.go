@@ -177,6 +177,32 @@ func responseErrorCode(t *testing.T, rr *httptest.ResponseRecorder) string {
 	return response["code"]
 }
 
+func loginRateLimitAudits(t *testing.T, db *store.DB) []map[string]string {
+	t.Helper()
+	rows, err := db.SQL.QueryContext(context.Background(),
+		`select metadata_json from audit_events where event_type = 'login_rate_limited' order by rowid`)
+	if err != nil {
+		t.Fatalf("查询登录限流审计失败：%v", err)
+	}
+	defer rows.Close()
+	var audits []map[string]string
+	for rows.Next() {
+		var metadataJSON string
+		if err := rows.Scan(&metadataJSON); err != nil {
+			t.Fatalf("读取登录限流审计失败：%v", err)
+		}
+		var metadata map[string]string
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			t.Fatalf("解析登录限流审计失败：%v", err)
+		}
+		audits = append(audits, metadata)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历登录限流审计失败：%v", err)
+	}
+	return audits
+}
+
 func TestPasswordLoginWithEnabledTwoFactorReturnsChallengeWithoutSession(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, true)
 	rr := fixture.passwordLogin(testLoginUsername, testLoginPassword)
@@ -266,17 +292,35 @@ func TestCorruptedTwoFactorCiphertextReturnsUnavailable(t *testing.T) {
 
 func TestFifthPasswordFailureIsRateLimited(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, false)
-	for attempt := 1; attempt <= 5; attempt++ {
+	for attempt := 1; attempt <= 6; attempt++ {
 		rr := fixture.passwordLogin(testLoginUsername, "wrong-password")
 		want := http.StatusUnauthorized
-		if attempt == 5 {
+		if attempt >= 5 {
 			want = http.StatusTooManyRequests
 		}
 		if rr.Code != want {
 			t.Fatalf("第 %d 次密码失败状态码 = %d，期望 %d；响应=%s", attempt, rr.Code, want, rr.Body.String())
 		}
-		if attempt == 5 && rr.Header().Get("Retry-After") == "" {
-			t.Fatal("密码限流响应缺少 Retry-After")
+		if attempt >= 5 {
+			if rr.Header().Get("Retry-After") == "" {
+				t.Fatal("密码限流响应缺少 Retry-After")
+			}
+			if code := responseErrorCode(t, rr); code != "too_many_attempts" {
+				t.Fatalf("密码限流错误码 = %q，期望 too_many_attempts", code)
+			}
+		}
+		audits := loginRateLimitAudits(t, fixture.db)
+		wantAudits := 0
+		if attempt >= 5 {
+			wantAudits = 1
+		}
+		if len(audits) != wantAudits {
+			t.Fatalf("第 %d 次密码失败后的限流审计数 = %d，期望 %d", attempt, len(audits), wantAudits)
+		}
+		if len(audits) == 1 {
+			if len(audits[0]) != 2 || audits[0]["stage"] != "password" || audits[0]["source_ip"] != testLoginIP {
+				t.Fatalf("密码限流审计元数据 = %#v", audits[0])
+			}
 		}
 	}
 }
@@ -284,18 +328,56 @@ func TestFifthPasswordFailureIsRateLimited(t *testing.T) {
 func TestFifthSecondFactorFailureIsRateLimited(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, true)
 	challenge := fixture.beginTwoFactorLogin().ChallengeToken
-	for attempt := 1; attempt <= 5; attempt++ {
+	for attempt := 1; attempt <= 6; attempt++ {
 		rr := fixture.secondFactor(challenge, "abcdef", "application/json")
 		want := http.StatusUnauthorized
-		if attempt == 5 {
+		if attempt >= 5 {
 			want = http.StatusTooManyRequests
 		}
 		if rr.Code != want {
 			t.Fatalf("第 %d 次二因素失败状态码 = %d，期望 %d；响应=%s", attempt, rr.Code, want, rr.Body.String())
 		}
-		if attempt == 5 && rr.Header().Get("Retry-After") == "" {
-			t.Fatal("二因素限流响应缺少 Retry-After")
+		if attempt >= 5 {
+			if rr.Header().Get("Retry-After") == "" {
+				t.Fatal("二因素限流响应缺少 Retry-After")
+			}
+			if code := responseErrorCode(t, rr); code != "too_many_attempts" {
+				t.Fatalf("二因素限流错误码 = %q，期望 too_many_attempts", code)
+			}
 		}
+		audits := loginRateLimitAudits(t, fixture.db)
+		wantAudits := 0
+		if attempt >= 5 {
+			wantAudits = 1
+		}
+		if len(audits) != wantAudits {
+			t.Fatalf("第 %d 次二因素失败后的限流审计数 = %d，期望 %d", attempt, len(audits), wantAudits)
+		}
+		if len(audits) == 1 {
+			if len(audits[0]) != 2 || audits[0]["stage"] != "second_factor" || audits[0]["source_ip"] != testLoginIP {
+				t.Fatalf("二因素限流审计元数据 = %#v", audits[0])
+			}
+		}
+	}
+}
+
+func TestInvalidTOTPUsesExactErrorCode(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+
+	rr := fixture.secondFactor(challenge, "abcdef", "application/json")
+	if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "invalid_two_factor_code" {
+		t.Fatalf("无效 TOTP 响应 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInvalidRecoveryCodeUsesExactErrorCode(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+
+	rr := fixture.secondFactor(challenge, "WRONG-RECOVERY-CODE", "application/json")
+	if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "invalid_two_factor_code" {
+		t.Fatalf("无效恢复码响应 = %d %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -336,6 +418,58 @@ func TestLoginAuditIsWrittenOnlyAfterSecondFactorCompletion(t *testing.T) {
 	}
 	if len(metadata) != 1 || metadata["method"] != "totp" {
 		t.Fatalf("登录审计元数据 = %#v，期望仅 method=totp", metadata)
+	}
+}
+
+func TestPasswordLoginAuditContainsOnlyPasswordMethod(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	rr := fixture.passwordLogin(testLoginUsername, testLoginPassword)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("密码登录状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var metadataJSON string
+	if err := fixture.db.SQL.QueryRowContext(context.Background(),
+		`select metadata_json from audit_events where event_type = 'login'`).Scan(&metadataJSON); err != nil {
+		t.Fatalf("查询密码登录审计失败：%v", err)
+	}
+	if metadataJSON != `{"method":"password"}` {
+		t.Fatalf("密码登录审计元数据 = %s", metadataJSON)
+	}
+}
+
+func TestPasswordLoginStoreFailureReturnsUnavailableWithoutCountingFailure(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	if err := fixture.db.Close(); err != nil {
+		t.Fatalf("关闭测试数据库失败：%v", err)
+	}
+	limiter := auth.NewFailureLimiter(1, 10*time.Minute, 15*time.Minute, 10, func() time.Time { return fixture.now })
+	fixture.handler = NewRouter(Deps{
+		Store:           fixture.db,
+		Sessions:        auth.NewSessionManager(testLoginRootKey, time.Hour),
+		TwoFactor:       fixture.manager,
+		PasswordLimiter: limiter,
+		Now:             func() time.Time { return fixture.now },
+	})
+
+	rr := fixture.passwordLogin(testLoginUsername, testLoginPassword)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("密码阶段存储故障状态码 = %d，期望 500；响应=%s", rr.Code, rr.Body.String())
+	}
+	if allowed, _ := limiter.Allow(strings.ToLower(testLoginUsername) + "|" + testLoginIP); !allowed {
+		t.Fatal("密码阶段存储故障不应计入失败限流")
+	}
+}
+
+func TestSecondFactorUserStoreFailureReturnsUnavailable(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+	if err := fixture.db.Close(); err != nil {
+		t.Fatalf("关闭测试数据库失败：%v", err)
+	}
+
+	rr := fixture.secondFactor(challenge, fixture.currentTOTP(), "application/json")
+	if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "two_factor_unavailable" {
+		t.Fatalf("二步用户存储故障响应 = %d %s", rr.Code, rr.Body.String())
 	}
 }
 

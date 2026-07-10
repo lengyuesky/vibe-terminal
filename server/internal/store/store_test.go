@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -23,6 +24,229 @@ func TestMigrateCreatesCoreTables(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %s was not created: %v", table, err)
 		}
+	}
+}
+
+func TestMigrateCreatesTwoFactorTables(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes"} {
+		var name string
+		err := db.SQL.QueryRowContext(ctx, `select name from sqlite_master where type='table' and name=?`, table).Scan(&name)
+		if err != nil {
+			t.Fatalf("table %s was not created: %v", table, err)
+		}
+	}
+}
+
+func TestPendingTwoFactorRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "user-2fa", Username: "alice", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	setting := UserTwoFactor{
+		UserID:           "user-2fa",
+		ConfigurationID:  "configuration-1",
+		SecretCiphertext: "ciphertext-1",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(10 * time.Minute), Valid: true},
+		EnabledAt:        sql.NullTime{Time: now, Valid: true},
+		LastTOTPCounter:  sql.NullInt64{Int64: 42, Valid: true},
+	}
+	if err := db.SavePendingTwoFactor(ctx, setting); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+
+	pending, err := db.GetPendingTwoFactor(ctx, "user-2fa", now)
+	if err != nil {
+		t.Fatalf("get pending two factor: %v", err)
+	}
+	if pending.ConfigurationID != "configuration-1" || pending.SecretCiphertext != "ciphertext-1" {
+		t.Fatalf("pending two factor = %#v", pending)
+	}
+	if pending.EnabledAt.Valid || pending.LastTOTPCounter.Valid {
+		t.Fatalf("pending two factor must not be enabled: %#v", pending)
+	}
+	if pending.CreatedAt.IsZero() || pending.UpdatedAt.IsZero() {
+		t.Fatalf("pending timestamps were not set: %#v", pending)
+	}
+	if pending.CreatedAt.Location() != time.UTC || pending.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("pending timestamps must use UTC: %#v", pending)
+	}
+	if _, err := db.GetEnabledTwoFactor(ctx, "user-2fa"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get enabled two factor error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingTwoFactorExpiredIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "expired-user", Username: "expired", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "expired-user",
+		ConfigurationID:  "expired-configuration",
+		SecretCiphertext: "expired-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(-time.Second), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+
+	if _, err := db.GetPendingTwoFactor(ctx, "expired-user", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get expired pending two factor error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingTwoFactorReplacesExistingPending(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "replace-user", Username: "replace", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	createdAt := now.Add(-time.Hour)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "replace-user",
+		ConfigurationID:  "old-configuration",
+		SecretCiphertext: "old-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(5 * time.Minute), Valid: true},
+		CreatedAt:        createdAt,
+		UpdatedAt:        createdAt,
+	}); err != nil {
+		t.Fatalf("save first pending two factor: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`update user_two_factor set last_totp_counter = ? where user_id = ?`, 42, "replace-user"); err != nil {
+		t.Fatalf("seed last TOTP counter: %v", err)
+	}
+
+	updatedAt := now.Add(time.Minute)
+	expiresAt := now.Add(10 * time.Minute)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "replace-user",
+		ConfigurationID:  "new-configuration",
+		SecretCiphertext: "new-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: expiresAt, Valid: true},
+		CreatedAt:        now,
+		UpdatedAt:        updatedAt,
+	}); err != nil {
+		t.Fatalf("replace pending two factor: %v", err)
+	}
+
+	pending, err := db.GetPendingTwoFactor(ctx, "replace-user", now)
+	if err != nil {
+		t.Fatalf("get replaced pending two factor: %v", err)
+	}
+	if pending.ConfigurationID != "new-configuration" || pending.SecretCiphertext != "new-ciphertext" {
+		t.Fatalf("replaced pending two factor = %#v", pending)
+	}
+	if !pending.SetupExpiresAt.Valid || !pending.SetupExpiresAt.Time.Equal(expiresAt) {
+		t.Fatalf("setup_expires_at = %#v, want %s", pending.SetupExpiresAt, expiresAt)
+	}
+	if !pending.CreatedAt.Equal(createdAt) || !pending.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("timestamps after replacement = created %s updated %s", pending.CreatedAt, pending.UpdatedAt)
+	}
+	if pending.EnabledAt.Valid || pending.LastTOTPCounter.Valid {
+		t.Fatalf("replaced pending two factor retained enabled state: %#v", pending)
+	}
+}
+
+func TestPendingTwoFactorDoesNotReplaceEnabled(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "enabled-user", Username: "enabled", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(5 * time.Minute)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "enabled-user",
+		ConfigurationID:  "enabled-configuration",
+		SecretCiphertext: "enabled-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: expiresAt, Valid: true},
+		CreatedAt:        now.Add(-time.Hour),
+		UpdatedAt:        now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	enabledAt := now.Add(-30 * time.Second)
+	if _, err := db.SQL.ExecContext(ctx,
+		`update user_two_factor set enabled_at = ?, last_totp_counter = ? where user_id = ?`,
+		enabledAt, 42, "enabled-user"); err != nil {
+		t.Fatalf("enable two factor: %v", err)
+	}
+
+	err = db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "enabled-user",
+		ConfigurationID:  "replacement-configuration",
+		SecretCiphertext: "replacement-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now.Add(time.Hour), Valid: true},
+		UpdatedAt:        now,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("replace enabled two factor error = %v, want ErrConflict", err)
+	}
+
+	enabled, err := db.GetEnabledTwoFactor(ctx, "enabled-user")
+	if err != nil {
+		t.Fatalf("get enabled two factor: %v", err)
+	}
+	if enabled.ConfigurationID != "enabled-configuration" || enabled.SecretCiphertext != "enabled-ciphertext" {
+		t.Fatalf("enabled two factor was overwritten: %#v", enabled)
+	}
+	if !enabled.SetupExpiresAt.Valid || !enabled.SetupExpiresAt.Time.Equal(expiresAt) {
+		t.Fatalf("enabled setup_expires_at = %#v, want %s", enabled.SetupExpiresAt, expiresAt)
+	}
+	if !enabled.EnabledAt.Valid || !enabled.EnabledAt.Time.Equal(enabledAt) {
+		t.Fatalf("enabled_at = %#v, want %s", enabled.EnabledAt, enabledAt)
+	}
+	if !enabled.LastTOTPCounter.Valid || enabled.LastTOTPCounter.Int64 != 42 {
+		t.Fatalf("last_totp_counter = %#v, want 42", enabled.LastTOTPCounter)
+	}
+	if !enabled.UpdatedAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("updated_at = %s, want unchanged", enabled.UpdatedAt)
 	}
 }
 

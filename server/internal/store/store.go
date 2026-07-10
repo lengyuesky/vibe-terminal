@@ -34,6 +34,24 @@ type User struct {
 	UpdatedAt    time.Time
 }
 
+// UserTwoFactor 保存用户的双因素认证状态。
+type UserTwoFactor struct {
+	UserID           string
+	ConfigurationID  string
+	SecretCiphertext string
+	SetupExpiresAt   sql.NullTime
+	EnabledAt        sql.NullTime
+	LastTOTPCounter  sql.NullInt64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// RecoveryCodeInput 表示待持久化的恢复码标识和哈希。
+type RecoveryCodeInput struct {
+	ID   string
+	Hash string
+}
+
 type AgentToken struct {
 	ID        string
 	Name      string
@@ -130,6 +148,24 @@ func (db *DB) Migrate(ctx context.Context) error {
 			password_hash text not null,
 			created_at datetime not null,
 			updated_at datetime not null
+		)`,
+		`create table if not exists user_two_factor (
+			user_id text primary key references users(id) on delete cascade,
+			configuration_id text not null,
+			secret_ciphertext text not null,
+			setup_expires_at datetime,
+			enabled_at datetime,
+			last_totp_counter integer,
+			created_at datetime not null,
+			updated_at datetime not null
+		)`,
+		`create table if not exists two_factor_recovery_codes (
+			id text primary key,
+			user_id text not null references users(id) on delete cascade,
+			code_hash text not null,
+			used_at datetime,
+			created_at datetime not null,
+			unique(user_id, code_hash)
 		)`,
 		`create table if not exists agent_tokens (
 			id text primary key,
@@ -235,6 +271,62 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return user, err
+}
+
+// SavePendingTwoFactor 保存尚待用户确认的双因素认证配置。
+func (db *DB) SavePendingTwoFactor(ctx context.Context, setting UserTwoFactor) error {
+	now := time.Now().UTC()
+	if setting.CreatedAt.IsZero() {
+		setting.CreatedAt = now
+	}
+	if setting.UpdatedAt.IsZero() {
+		setting.UpdatedAt = now
+	}
+	result, err := db.SQL.ExecContext(ctx,
+		`insert into user_two_factor (
+			user_id, configuration_id, secret_ciphertext, setup_expires_at,
+			enabled_at, last_totp_counter, created_at, updated_at
+		) values (?, ?, ?, ?, null, null, ?, ?)
+		on conflict(user_id) do update set
+			configuration_id = excluded.configuration_id,
+			secret_ciphertext = excluded.secret_ciphertext,
+			setup_expires_at = excluded.setup_expires_at,
+			enabled_at = null,
+			last_totp_counter = null,
+			updated_at = excluded.updated_at
+		where user_two_factor.enabled_at is null`,
+		setting.UserID, setting.ConfigurationID, setting.SecretCiphertext, setting.SetupExpiresAt,
+		setting.CreatedAt, setting.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (db *DB) GetEnabledTwoFactor(ctx context.Context, userID string) (UserTwoFactor, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select user_id, configuration_id, secret_ciphertext, setup_expires_at,
+			enabled_at, last_totp_counter, created_at, updated_at
+		from user_two_factor where user_id = ? and enabled_at is not null`,
+		userID)
+	return scanUserTwoFactor(row)
+}
+
+func (db *DB) GetPendingTwoFactor(ctx context.Context, userID string, now time.Time) (UserTwoFactor, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select user_id, configuration_id, secret_ciphertext, setup_expires_at,
+			enabled_at, last_totp_counter, created_at, updated_at
+		from user_two_factor
+		where user_id = ? and enabled_at is null and setup_expires_at > ?`,
+		userID, now)
+	return scanUserTwoFactor(row)
 }
 
 func (db *DB) CreateAgentToken(ctx context.Context, params CreateAgentTokenParams) (AgentToken, error) {
@@ -642,6 +734,16 @@ func (db *DB) DeleteCommandSnippet(ctx context.Context, id string) error {
 
 type scanner interface {
 	Scan(dest ...any) error
+}
+
+func scanUserTwoFactor(s scanner) (UserTwoFactor, error) {
+	var setting UserTwoFactor
+	err := s.Scan(&setting.UserID, &setting.ConfigurationID, &setting.SecretCiphertext, &setting.SetupExpiresAt,
+		&setting.EnabledAt, &setting.LastTOTPCounter, &setting.CreatedAt, &setting.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserTwoFactor{}, ErrNotFound
+	}
+	return setting, err
 }
 
 func scanDevice(s scanner) (Device, error) {

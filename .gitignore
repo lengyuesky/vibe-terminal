@@ -18,3 +18,4 @@ data/
 workspace-data/
 .tools/
 docs/
+.worktrees/

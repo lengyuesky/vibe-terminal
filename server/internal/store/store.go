@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -125,7 +126,12 @@ type CommandSnippet struct {
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	dsn := path + separator + "_pragma=foreign_keys(1)"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -276,11 +282,18 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 // SavePendingTwoFactor 保存尚待用户确认的双因素认证配置。
 func (db *DB) SavePendingTwoFactor(ctx context.Context, setting UserTwoFactor) error {
 	now := time.Now().UTC()
+	if setting.SetupExpiresAt.Valid {
+		setting.SetupExpiresAt.Time = setting.SetupExpiresAt.Time.UTC()
+	}
 	if setting.CreatedAt.IsZero() {
 		setting.CreatedAt = now
+	} else {
+		setting.CreatedAt = setting.CreatedAt.UTC()
 	}
 	if setting.UpdatedAt.IsZero() {
 		setting.UpdatedAt = now
+	} else {
+		setting.UpdatedAt = setting.UpdatedAt.UTC()
 	}
 	result, err := db.SQL.ExecContext(ctx,
 		`insert into user_two_factor (
@@ -325,7 +338,7 @@ func (db *DB) GetPendingTwoFactor(ctx context.Context, userID string, now time.T
 			enabled_at, last_totp_counter, created_at, updated_at
 		from user_two_factor
 		where user_id = ? and enabled_at is null and setup_expires_at > ?`,
-		userID, now)
+		userID, now.UTC())
 	return scanUserTwoFactor(row)
 }
 

@@ -4,9 +4,115 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestOpenEnablesForeignKeysOnEveryConnection(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "store.db")
+	queryPath := "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "store-with-query.db")) + "?cache=shared"
+	for _, testCase := range []struct {
+		name string
+		path string
+	}{
+		{name: "memory", path: ":memory:"},
+		{name: "file", path: filePath},
+		{name: "file with query", path: queryPath},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := Open(ctx, testCase.path)
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer db.Close()
+			db.SQL.SetMaxOpenConns(2)
+
+			first, err := db.SQL.Conn(ctx)
+			if err != nil {
+				t.Fatalf("get first connection: %v", err)
+			}
+			defer first.Close()
+			second, err := db.SQL.Conn(ctx)
+			if err != nil {
+				t.Fatalf("get second connection: %v", err)
+			}
+			defer second.Close()
+
+			for index, connection := range []*sql.Conn{first, second} {
+				var enabled int
+				if err := connection.QueryRowContext(ctx, `pragma foreign_keys`).Scan(&enabled); err != nil {
+					t.Fatalf("query foreign_keys on connection %d: %v", index+1, err)
+				}
+				if enabled != 1 {
+					t.Fatalf("foreign_keys on connection %d = %d, want 1", index+1, enabled)
+				}
+			}
+		})
+	}
+}
+
+func TestDeleteUserCascadesTwoFactorRowsOnPooledConnection(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "cascade.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	db.SQL.SetMaxOpenConns(2)
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "cascade-user", Username: "cascade", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "cascade-user",
+		ConfigurationID:  "cascade-configuration",
+		SecretCiphertext: "cascade-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: time.Now().UTC().Add(time.Hour), Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`insert into two_factor_recovery_codes (id, user_id, code_hash, created_at) values (?, ?, ?, ?)`,
+		"recovery-code-1", "cascade-user", "recovery-hash-1", time.Now().UTC()); err != nil {
+		t.Fatalf("insert recovery code: %v", err)
+	}
+
+	first, err := db.SQL.Conn(ctx)
+	if err != nil {
+		t.Fatalf("get first connection: %v", err)
+	}
+	second, err := db.SQL.Conn(ctx)
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("get second connection: %v", err)
+	}
+	if _, err := second.ExecContext(ctx, `delete from users where id = ?`, "cascade-user"); err != nil {
+		_ = second.Close()
+		_ = first.Close()
+		t.Fatalf("delete user: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		_ = first.Close()
+		t.Fatalf("close second connection: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first connection: %v", err)
+	}
+
+	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes"} {
+		var count int
+		if err := db.SQL.QueryRowContext(ctx, `select count(*) from `+table+` where user_id = ?`, "cascade-user").Scan(&count); err != nil {
+			t.Fatalf("count %s rows: %v", table, err)
+		}
+		if count != 0 {
+			t.Errorf("%s rows after user delete = %d, want 0", table, count)
+		}
+	}
+}
 
 func TestMigrateCreatesCoreTables(t *testing.T) {
 	ctx := context.Background()
@@ -120,6 +226,85 @@ func TestPendingTwoFactorExpiredIsNotFound(t *testing.T) {
 
 	if _, err := db.GetPendingTwoFactor(ctx, "expired-user", now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get expired pending two factor error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingTwoFactorNormalizesTimesToUTC(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "timezone-user", Username: "timezone", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	chinaStandardTime := time.FixedZone("UTC+8", 8*60*60)
+	expiresAt := time.Date(2026, time.July, 10, 16, 0, 0, 0, chinaStandardTime)
+	createdAt := expiresAt.Add(-time.Hour)
+	updatedAt := expiresAt.Add(-time.Minute)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "timezone-user",
+		ConfigurationID:  "timezone-configuration",
+		SecretCiphertext: "timezone-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: expiresAt, Valid: true},
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+
+	if _, err := db.GetPendingTwoFactor(ctx, "timezone-user", expiresAt.UTC().Add(time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get cross-timezone expired two factor error = %v, want ErrNotFound", err)
+	}
+
+	var storedSetupExpiresAt sql.NullTime
+	var storedCreatedAt time.Time
+	var storedUpdatedAt time.Time
+	if err := db.SQL.QueryRowContext(ctx,
+		`select setup_expires_at, created_at, updated_at from user_two_factor where user_id = ?`,
+		"timezone-user").Scan(&storedSetupExpiresAt, &storedCreatedAt, &storedUpdatedAt); err != nil {
+		t.Fatalf("query stored timestamps: %v", err)
+	}
+	if storedSetupExpiresAt.Time.Location() != time.UTC || storedCreatedAt.Location() != time.UTC || storedUpdatedAt.Location() != time.UTC {
+		t.Fatalf("stored timestamps must use UTC: setup=%s created=%s updated=%s",
+			storedSetupExpiresAt.Time, storedCreatedAt, storedUpdatedAt)
+	}
+	if !storedSetupExpiresAt.Time.Equal(expiresAt) || !storedCreatedAt.Equal(createdAt) || !storedUpdatedAt.Equal(updatedAt) {
+		t.Fatalf("stored timestamps changed instant: setup=%s created=%s updated=%s",
+			storedSetupExpiresAt.Time, storedCreatedAt, storedUpdatedAt)
+	}
+}
+
+func TestPendingTwoFactorExpiresAtNowIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, User{ID: "boundary-user", Username: "boundary", PasswordHash: "password-hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 10, 8, 0, 0, 0, time.UTC)
+	if err := db.SavePendingTwoFactor(ctx, UserTwoFactor{
+		UserID:           "boundary-user",
+		ConfigurationID:  "boundary-configuration",
+		SecretCiphertext: "boundary-ciphertext",
+		SetupExpiresAt:   sql.NullTime{Time: now, Valid: true},
+	}); err != nil {
+		t.Fatalf("save pending two factor: %v", err)
+	}
+	if _, err := db.GetPendingTwoFactor(ctx, "boundary-user", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get boundary pending two factor error = %v, want ErrNotFound", err)
 	}
 }
 

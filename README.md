@@ -212,7 +212,8 @@ Docker Compose：
 ```bash
 cp config.example.yaml config.yaml
 # 编辑 config.yaml，至少替换 session_secret 和 admin_password
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 建议把服务部署在 Caddy 或 Nginx 后面，并只通过 HTTPS 暴露。示例配置：

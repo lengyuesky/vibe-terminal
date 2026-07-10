@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -37,9 +38,14 @@ func main() {
 	if err := ensureAdmin(ctx, db, cfg.AdminUsername, cfg.AdminPassword); err != nil {
 		log.Fatalf("ensure administrator: %v", err)
 	}
+	twoFactor, err := auth.NewTwoFactorManager(cfg.SessionSecret, time.Now)
+	if err != nil {
+		log.Fatalf("create two factor manager: %v", err)
+	}
 	router := httpapi.NewRouter(httpapi.Deps{
 		Store:           db,
 		Sessions:        auth.NewSessionManager(cfg.SessionSecret, cfg.SessionDuration),
+		TwoFactor:       twoFactor,
 		Output:          terminal.FileOutputWriter{Root: cfg.OutputRoot},
 		StaticFiles:     http.Dir(cfg.WebDir),
 		FsMaxUploadSize: cfg.FsMaxUploadSize,

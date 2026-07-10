@@ -1,8 +1,6 @@
 services:
   server:
-    build:
-      context: .
-      dockerfile: server/Dockerfile
+    image: ghcr.io/lengyuesky/vibe-terminal:latest
     environment:
       VIBE_CONFIG: "/app/config.yaml"
     volumes:

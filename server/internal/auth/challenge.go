@@ -108,6 +108,10 @@ func (m *TwoFactorManager) RecoveryCodeHash(userID, code string) string {
 
 // IssueLoginChallenge 签发五分钟有效的登录挑战。
 func (m *TwoFactorManager) IssueLoginChallenge(userID, configurationID string) (string, error) {
+	if userID == "" || configurationID == "" {
+		return "", errors.New("login challenge identifiers are required")
+	}
+
 	now := m.now().UTC()
 	payload := challengePayload{
 		Version:         loginChallengeVersion,

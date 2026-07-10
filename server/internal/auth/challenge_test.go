@@ -189,6 +189,32 @@ func TestLoginChallengeRoundTripPreservesConfigurationID(t *testing.T) {
 	}
 }
 
+func TestLoginChallengeIssueRejectsMissingIdentifiers(t *testing.T) {
+	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
+	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("创建双因素管理器失败：%v", err)
+	}
+
+	tests := []struct {
+		name            string
+		userID          string
+		configurationID string
+	}{
+		{name: "用户 ID 为空", configurationID: "configuration-1"},
+		{name: "配置 ID 为空", userID: "user-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token, err := manager.IssueLoginChallenge(tt.userID, tt.configurationID)
+			if err == nil {
+				t.Fatalf("标识为空时不应签发登录挑战，实际令牌 = %q", token)
+			}
+		})
+	}
+}
+
 func TestLoginChallengeExpiresAfterFiveMinutes(t *testing.T) {
 	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
 	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })
@@ -203,6 +229,59 @@ func TestLoginChallengeExpiresAfterFiveMinutes(t *testing.T) {
 	now = now.Add(6 * time.Minute)
 	if _, err := manager.VerifyLoginChallenge(token); err == nil {
 		t.Fatal("签发六分钟后的登录挑战应已过期")
+	}
+}
+
+func TestLoginChallengeExpirationBoundary(t *testing.T) {
+	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
+	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("创建双因素管理器失败：%v", err)
+	}
+	token := signChallengePayloadForTest(t, manager, challengePayload{
+		Version:         loginChallengeVersion,
+		UserID:          "user-1",
+		ConfigurationID: "configuration-1",
+		IssuedAt:        now.Add(-5 * time.Minute).Unix(),
+		ExpiresAt:       now.Unix(),
+	})
+
+	if _, err := manager.VerifyLoginChallenge(token); err != nil {
+		t.Fatalf("当前时间等于过期时间时验证失败：%v", err)
+	}
+	now = now.Add(time.Second)
+	if _, err := manager.VerifyLoginChallenge(token); err == nil {
+		t.Fatal("当前时间晚于过期时间时不应验证成功")
+	}
+}
+
+func TestLoginChallengeIssuedAtClockSkewBoundary(t *testing.T) {
+	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
+	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("创建双因素管理器失败：%v", err)
+	}
+
+	atBoundary := signChallengePayloadForTest(t, manager, challengePayload{
+		Version:         loginChallengeVersion,
+		UserID:          "user-1",
+		ConfigurationID: "configuration-1",
+		IssuedAt:        now.Add(time.Minute).Unix(),
+		ExpiresAt:       now.Add(5 * time.Minute).Unix(),
+	})
+	if _, err := manager.VerifyLoginChallenge(atBoundary); err != nil {
+		t.Fatalf("签发时间正好领先一分钟时验证失败：%v", err)
+	}
+
+	beyondBoundary := signChallengePayloadForTest(t, manager, challengePayload{
+		Version:         loginChallengeVersion,
+		UserID:          "user-1",
+		ConfigurationID: "configuration-1",
+		IssuedAt:        now.Add(time.Minute + time.Second).Unix(),
+		ExpiresAt:       now.Add(5 * time.Minute).Unix(),
+	})
+	if _, err := manager.VerifyLoginChallenge(beyondBoundary); err == nil {
+		t.Fatal("签发时间领先超过一分钟时不应验证成功")
 	}
 }
 

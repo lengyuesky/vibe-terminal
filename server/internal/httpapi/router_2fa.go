@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/djy/vibe-terminal/server/internal/auth"
 	"github.com/djy/vibe-terminal/server/internal/store"
 )
@@ -17,6 +19,255 @@ type verifiedLoginCode struct {
 	method       string
 	totpCounter  sql.NullInt64
 	recoveryHash string
+}
+
+func (r *router) handleTwoFactorStatus(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	if _, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID); errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled":                  false,
+			"recovery_codes_remaining": 0,
+		})
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+
+	remaining, err := r.store.CountRecoveryCodes(req.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":                  true,
+		"recovery_codes_remaining": remaining,
+	})
+}
+
+func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if !readLoginJSON(w, req, &body) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, body.Password) {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		return
+	}
+	if r.twoFactor == nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	if _, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID); err == nil {
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+
+	manualKey, otpauthURI, ciphertext, err := r.twoFactor.GenerateSetup("Vibe Terminal", user.Username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	now := r.now().UTC()
+	expiresAt := now.Add(10 * time.Minute)
+	err = r.store.SavePendingTwoFactor(req.Context(), store.UserTwoFactor{
+		UserID:           user.ID,
+		ConfigurationID:  uuid.NewString(),
+		SecretCiphertext: ciphertext,
+		SetupExpiresAt:   sql.NullTime{Time: expiresAt, Valid: true},
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	})
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"manual_key":  manualKey,
+		"otpauth_uri": otpauthURI,
+		"expires_at":  expiresAt,
+	})
+}
+
+func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if !readLoginJSON(w, req, &body) {
+		return
+	}
+	if r.twoFactor == nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	now := r.now().UTC()
+	pending, err := r.store.GetPendingTwoFactor(req.Context(), user.ID, now)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusConflict, "two_factor_setup_expired", "two factor setup has expired")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	secret, err := r.twoFactor.DecryptSecret(pending.SecretCiphertext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	counter, matched, err := auth.MatchTOTP(secret, strings.TrimSpace(body.Code), now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	if !matched {
+		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		return
+	}
+	rawCodes, hashes, err := r.twoFactor.GenerateRecoveryCodes(user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	codes := make([]store.RecoveryCodeInput, len(hashes))
+	for i, hash := range hashes {
+		codes[i] = store.RecoveryCodeInput{ID: uuid.NewString(), Hash: hash}
+	}
+	err = r.store.EnableTwoFactor(req.Context(), user.ID, pending.ConfigurationID, counter, codes, now)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_enabled", "two factor authentication enabled")
+	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": rawCodes})
+}
+
+func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if !readLoginJSON(w, req, &body) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, body.Password) {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		return
+	}
+	if r.twoFactor == nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	now := r.now().UTC()
+	setting, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	secret, err := r.twoFactor.DecryptSecret(setting.SecretCiphertext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	counter, matched, err := auth.MatchTOTP(secret, strings.TrimSpace(body.Code), now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	if !matched {
+		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		return
+	}
+	rawCodes, hashes, err := r.twoFactor.GenerateRecoveryCodes(user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	codes := make([]store.RecoveryCodeInput, len(hashes))
+	for i, hash := range hashes {
+		codes[i] = store.RecoveryCodeInput{ID: uuid.NewString(), Hash: hash}
+	}
+	err = r.store.ReplaceRecoveryCodesAfterTOTP(req.Context(), user.ID, setting.ConfigurationID, counter, codes, now)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_recovery_codes_regenerated", "two factor recovery codes regenerated")
+	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": rawCodes})
+}
+
+func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request) {
+	user, ok := r.requireUser(w, req)
+	if !ok {
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if !readLoginJSON(w, req, &body) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, body.Password) {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		return
+	}
+	err := r.store.DisableTwoFactor(req.Context(), user.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_disabled", "two factor authentication disabled")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// auditCommittedTwoFactorChange 在状态提交后尽力记录审计。
+// 此时不能再向客户端返回失败，否则启用或轮换成功后会丢失仅返回一次的恢复码。
+func (r *router) auditCommittedTwoFactorChange(req *http.Request, userID, eventType, summary string) {
+	_ = r.audit.Log(req.Context(), store.AuditEvent{
+		UserID:    userID,
+		EventType: eventType,
+		Summary:   summary,
+	})
 }
 
 func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) {

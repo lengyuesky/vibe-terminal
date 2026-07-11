@@ -126,6 +126,11 @@ func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (r *router) routes() {
 	r.mux.HandleFunc("POST /api/login", r.handleLogin)
 	r.mux.HandleFunc("POST /api/login/2fa", r.handleLoginTwoFactor)
+	r.mux.HandleFunc("GET /api/security/2fa", r.handleTwoFactorStatus)
+	r.mux.HandleFunc("POST /api/security/2fa/setup", r.handleTwoFactorSetup)
+	r.mux.HandleFunc("POST /api/security/2fa/enable", r.handleTwoFactorEnable)
+	r.mux.HandleFunc("POST /api/security/2fa/recovery-codes", r.handleTwoFactorRecoveryCodes)
+	r.mux.HandleFunc("POST /api/security/2fa/disable", r.handleTwoFactorDisable)
 	r.mux.HandleFunc("POST /api/logout", r.handleLogout)
 	r.mux.HandleFunc("GET /api/me", r.handleMe)
 	r.mux.HandleFunc("POST /api/agent-tokens", r.handleCreateAgentToken)

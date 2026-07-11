@@ -53,8 +53,28 @@ type loginChallengeResponse struct {
 	ExpiresIn         int    `json:"expires_in"`
 }
 
+type twoFactorStatusResponse struct {
+	Enabled                bool `json:"enabled"`
+	RecoveryCodesRemaining int  `json:"recovery_codes_remaining"`
+}
+
+type twoFactorSetupResponse struct {
+	ManualKey  string    `json:"manual_key"`
+	OtpauthURI string    `json:"otpauth_uri"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+type recoveryCodesResponse struct {
+	RecoveryCodes []string `json:"recovery_codes"`
+}
+
 type failingAuditWriter struct {
 	err error
+}
+
+type recordingFailingAuditWriter struct {
+	err    error
+	events []store.AuditEvent
 }
 
 type countingReader struct {
@@ -69,6 +89,11 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 func (w failingAuditWriter) Log(context.Context, store.AuditEvent) error {
+	return w.err
+}
+
+func (w *recordingFailingAuditWriter) Log(_ context.Context, event store.AuditEvent) error {
+	w.events = append(w.events, event)
 	return w.err
 }
 
@@ -229,6 +254,68 @@ func (f *loginTwoFactorFixture) currentTOTP() string {
 	return fmt.Sprintf("%06d", value%1_000_000)
 }
 
+func (f *loginTwoFactorFixture) authenticatedCookie() *http.Cookie {
+	f.t.Helper()
+	rr := f.passwordLogin(testLoginUsername, testLoginPassword)
+	if rr.Code == http.StatusAccepted {
+		var response loginChallengeResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			f.t.Fatalf("解析登录挑战响应失败：%v", err)
+		}
+		rr = f.secondFactor(response.ChallengeToken, f.currentTOTP(), "application/json")
+	}
+	if rr.Code != http.StatusOK {
+		f.t.Fatalf("创建管理接口会话失败：状态码=%d，响应=%s", rr.Code, rr.Body.String())
+	}
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == auth.CookieName {
+			return cookie
+		}
+	}
+	f.t.Fatal("登录成功响应缺少会话 Cookie")
+	return nil
+}
+
+func (f *loginTwoFactorFixture) managementRequest(method, path, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	f.t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func (f *loginTwoFactorFixture) useAuditWriter(writer AuditWriter) {
+	f.t.Helper()
+	f.handler = NewRouter(Deps{
+		Store:     f.db,
+		Sessions:  auth.NewSessionManager(testLoginRootKey, time.Hour),
+		TwoFactor: f.manager,
+		Audit:     writer,
+		Now:       func() time.Time { return f.now },
+	})
+}
+
+func (f *loginTwoFactorFixture) beginManagementSetup(cookie *http.Cookie) twoFactorSetupResponse {
+	f.t.Helper()
+	rr := f.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if rr.Code != http.StatusOK {
+		f.t.Fatalf("创建管理 setup 失败：状态码=%d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var response twoFactorSetupResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		f.t.Fatalf("解析管理 setup 响应失败：%v", err)
+	}
+	f.secret = response.ManualKey
+	return response
+}
+
 func (f *loginTwoFactorFixture) router() *router {
 	f.t.Helper()
 	r, ok := f.handler.(*router)
@@ -315,6 +402,715 @@ func assertLoginChallengeUnconsumed(t *testing.T, db *store.DB, jti string) {
 	}
 	if consumedAt.Valid {
 		t.Fatalf("登录挑战 %s 不应被消费：%v", jti, consumedAt.Time)
+	}
+}
+
+func TestTwoFactorManagementStatusRequiresAuthentication(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+
+	rr := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", nil)
+	if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "unauthorized" {
+		t.Fatalf("未认证状态查询响应 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestTwoFactorManagementStatusReportsDisabledAndEnabled(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		enabled       bool
+		remainingCode int
+	}{
+		{name: "未启用", enabled: false, remainingCode: 0},
+		{name: "已启用", enabled: true, remainingCode: 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newLoginTwoFactorFixture(t, testCase.enabled)
+			cookie := fixture.authenticatedCookie()
+
+			rr := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("状态查询状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+			}
+			var response twoFactorStatusResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("解析状态查询响应失败：%v", err)
+			}
+			if response.Enabled != testCase.enabled || response.RecoveryCodesRemaining != testCase.remainingCode {
+				t.Fatalf("状态查询响应 = %#v", response)
+			}
+		})
+	}
+}
+
+func TestTwoFactorSetupRevalidatesPasswordAndSavesEncryptedPendingSecret(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+
+	wrong := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"wrong"}`, "application/json", cookie)
+	if wrong.Code != http.StatusUnauthorized || responseErrorCode(t, wrong) != "invalid_credentials" {
+		t.Fatalf("错误当前密码响应 = %d %s", wrong.Code, wrong.Body.String())
+	}
+	if _, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("错误密码后待确认配置错误 = %v，期望 not found", err)
+	}
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("创建待确认配置状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var response twoFactorSetupResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析待确认配置响应失败：%v", err)
+	}
+	if response.ManualKey == "" || !strings.HasPrefix(response.OtpauthURI, "otpauth://totp/") {
+		t.Fatalf("待确认配置响应缺少密钥或 URI：%#v", response)
+	}
+	if !response.ExpiresAt.Equal(fixture.now.Add(10 * time.Minute)) {
+		t.Fatalf("待确认配置到期时间 = %s", response.ExpiresAt)
+	}
+	pending, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now)
+	if err != nil {
+		t.Fatalf("读取待确认配置失败：%v", err)
+	}
+	if pending.ConfigurationID == "" || pending.SecretCiphertext == "" || pending.SecretCiphertext == response.ManualKey {
+		t.Fatalf("待确认配置未安全保存：%#v", pending)
+	}
+	decrypted, err := fixture.manager.DecryptSecret(pending.SecretCiphertext)
+	if err != nil || decrypted != response.ManualKey {
+		t.Fatalf("解密待确认密钥 = %q, %v", decrypted, err)
+	}
+	if strings.Contains(rr.Body.String(), pending.SecretCiphertext) {
+		t.Fatal("setup 响应泄露了密钥密文")
+	}
+}
+
+func TestTwoFactorSetupReplacesPendingButCannotOverwriteEnabledState(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	first := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if first.Code != http.StatusOK {
+		t.Fatalf("首次 setup 状态码 = %d，响应=%s", first.Code, first.Body.String())
+	}
+	firstPending, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now)
+	if err != nil {
+		t.Fatalf("读取首次 pending 失败：%v", err)
+	}
+	second := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if second.Code != http.StatusOK {
+		t.Fatalf("重复 pending setup 状态码 = %d，响应=%s", second.Code, second.Body.String())
+	}
+	secondPending, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now)
+	if err != nil {
+		t.Fatalf("读取替换 pending 失败：%v", err)
+	}
+	if secondPending.ConfigurationID == firstPending.ConfigurationID {
+		t.Fatal("重复 setup 未替换配置 UUID")
+	}
+
+	enabledFixture := newLoginTwoFactorFixture(t, true)
+	enabledCookie := enabledFixture.authenticatedCookie()
+	rr := enabledFixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", enabledCookie)
+	if rr.Code != http.StatusConflict || responseErrorCode(t, rr) != "two_factor_state_conflict" {
+		t.Fatalf("已启用状态 setup 响应 = %d %s", rr.Code, rr.Body.String())
+	}
+	setting, err := enabledFixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID)
+	if err != nil || setting.ConfigurationID != testLoginConfigurationID {
+		t.Fatalf("已启用配置被覆盖：%#v, %v", setting, err)
+	}
+}
+
+func TestTwoFactorSetupUnavailableWithoutManager(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.handler = NewRouter(Deps{
+		Store:    fixture.db,
+		Sessions: auth.NewSessionManager(testLoginRootKey, time.Hour),
+		Now:      func() time.Time { return fixture.now },
+	})
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "two_factor_unavailable" {
+		t.Fatalf("缺少二因素管理器响应 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestTwoFactorEnableRejectsInvalidCodeWithoutChangingPending(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.beginManagementSetup(cookie)
+	pendingBefore, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now)
+	if err != nil {
+		t.Fatalf("读取启用前 pending 失败：%v", err)
+	}
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"abcdef"}`, "application/json", cookie)
+	if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "invalid_two_factor_code" {
+		t.Fatalf("错误启用 TOTP 响应 = %d %s", rr.Code, rr.Body.String())
+	}
+	pendingAfter, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now)
+	if err != nil || pendingAfter.ConfigurationID != pendingBefore.ConfigurationID {
+		t.Fatalf("错误 TOTP 改变了 pending：%#v, %v", pendingAfter, err)
+	}
+}
+
+func TestTwoFactorEnableReturnsRecoveryCodesOnceWithoutLeakingStoredSecrets(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.beginManagementSetup(cookie)
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("启用二因素状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var response recoveryCodesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析启用响应失败：%v", err)
+	}
+	if len(response.RecoveryCodes) != 10 {
+		t.Fatalf("启用返回恢复码数量 = %d", len(response.RecoveryCodes))
+	}
+	setting, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID)
+	if err != nil {
+		t.Fatalf("读取已启用配置失败：%v", err)
+	}
+	if setting.SecretCiphertext == "" || strings.Contains(rr.Body.String(), setting.SecretCiphertext) {
+		t.Fatal("启用响应泄露或未保存密钥密文")
+	}
+	rows, err := fixture.db.SQL.QueryContext(context.Background(),
+		`select code_hash from two_factor_recovery_codes where user_id = ?`, testLoginUserID)
+	if err != nil {
+		t.Fatalf("查询恢复码哈希失败：%v", err)
+	}
+	defer rows.Close()
+	storedHashes := map[string]struct{}{}
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("读取恢复码哈希失败：%v", err)
+		}
+		storedHashes[hash] = struct{}{}
+		if strings.Contains(rr.Body.String(), hash) {
+			t.Fatal("启用响应泄露恢复码哈希")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历恢复码哈希失败：%v", err)
+	}
+	if len(storedHashes) != 10 {
+		t.Fatalf("存储恢复码哈希数量 = %d", len(storedHashes))
+	}
+	for _, code := range response.RecoveryCodes {
+		if _, leakedRaw := storedHashes[code]; leakedRaw {
+			t.Fatalf("数据库保存了原始恢复码：%q", code)
+		}
+	}
+	var auditCount int
+	if err := fixture.db.SQL.QueryRowContext(context.Background(),
+		`select count(*) from audit_events where event_type = 'two_factor_enabled' and user_id = ?`,
+		testLoginUserID).Scan(&auditCount); err != nil {
+		t.Fatalf("查询启用审计失败：%v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("启用审计数量 = %d", auditCount)
+	}
+
+	replay := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	if replay.Code != http.StatusConflict || responseErrorCode(t, replay) != "two_factor_setup_expired" {
+		t.Fatalf("重复 enable 响应 = %d %s", replay.Code, replay.Body.String())
+	}
+}
+
+func TestTwoFactorEnableRejectsExpiredOrMissingSetup(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.beginManagementSetup(cookie)
+	fixture.now = fixture.now.Add(10 * time.Minute)
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	if rr.Code != http.StatusConflict || responseErrorCode(t, rr) != "two_factor_setup_expired" {
+		t.Fatalf("过期 setup 启用响应 = %d %s", rr.Code, rr.Body.String())
+	}
+
+	missingFixture := newLoginTwoFactorFixture(t, false)
+	missingCookie := missingFixture.authenticatedCookie()
+	missing := missingFixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"000000"}`, "application/json", missingCookie)
+	if missing.Code != http.StatusConflict || responseErrorCode(t, missing) != "two_factor_setup_expired" {
+		t.Fatalf("不存在 setup 启用响应 = %d %s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestTwoFactorRecoveryCodeRotationRequiresPasswordAndCurrentTOTP(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	cookie := fixture.authenticatedCookie()
+	fixture.now = fixture.now.Add(time.Duration(auth.TOTPPeriodSeconds) * time.Second)
+
+	wrongPassword := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+		`{"password":"wrong","code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	if wrongPassword.Code != http.StatusUnauthorized || responseErrorCode(t, wrongPassword) != "invalid_credentials" {
+		t.Fatalf("轮换错误密码响应 = %d %s", wrongPassword.Code, wrongPassword.Body.String())
+	}
+	wrongTOTP := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+		`{"password":"secret","code":"abcdef"}`, "application/json", cookie)
+	if wrongTOTP.Code != http.StatusUnauthorized || responseErrorCode(t, wrongTOTP) != "invalid_two_factor_code" {
+		t.Fatalf("轮换错误 TOTP 响应 = %d %s", wrongTOTP.Code, wrongTOTP.Body.String())
+	}
+	for _, oldCode := range []string{fixture.recoveryCode, fixture.secondRecoveryCode} {
+		hash := fixture.manager.RecoveryCodeHash(testLoginUserID, oldCode)
+		var count int
+		if err := fixture.db.SQL.QueryRowContext(context.Background(),
+			`select count(*) from two_factor_recovery_codes where user_id = ? and code_hash = ? and used_at is null`,
+			testLoginUserID, hash).Scan(&count); err != nil {
+			t.Fatalf("查询错误凭据后的旧恢复码失败：%v", err)
+		}
+		if count != 1 {
+			t.Fatalf("错误凭据使旧恢复码 %q 失效", oldCode)
+		}
+	}
+}
+
+func TestTwoFactorRecoveryCodeRotationInvalidatesOldCodesAndRejectsTOTPReplay(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	cookie := fixture.authenticatedCookie()
+	fixture.now = fixture.now.Add(time.Duration(auth.TOTPPeriodSeconds) * time.Second)
+	code := fixture.currentTOTP()
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+		`{"password":"secret","code":"`+code+`"}`, "application/json", cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("轮换恢复码状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var response recoveryCodesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析轮换响应失败：%v", err)
+	}
+	if len(response.RecoveryCodes) != 10 {
+		t.Fatalf("轮换返回恢复码数量 = %d", len(response.RecoveryCodes))
+	}
+	for _, rawCode := range response.RecoveryCodes {
+		var rawCount int
+		if err := fixture.db.SQL.QueryRowContext(context.Background(),
+			`select count(*) from two_factor_recovery_codes where user_id = ? and code_hash = ?`,
+			testLoginUserID, rawCode).Scan(&rawCount); err != nil {
+			t.Fatalf("查询原始恢复码存储失败：%v", err)
+		}
+		if rawCount != 0 {
+			t.Fatalf("数据库保存了原始恢复码：%q", rawCode)
+		}
+		var hashCount int
+		if err := fixture.db.SQL.QueryRowContext(context.Background(),
+			`select count(*) from two_factor_recovery_codes where user_id = ? and code_hash = ?`,
+			testLoginUserID, fixture.manager.RecoveryCodeHash(testLoginUserID, rawCode)).Scan(&hashCount); err != nil {
+			t.Fatalf("查询轮换恢复码哈希失败：%v", err)
+		}
+		if hashCount != 1 {
+			t.Fatalf("轮换恢复码哈希数量 = %d", hashCount)
+		}
+	}
+	for _, oldCode := range []string{fixture.recoveryCode, fixture.secondRecoveryCode} {
+		oldHash := fixture.manager.RecoveryCodeHash(testLoginUserID, oldCode)
+		var count int
+		if err := fixture.db.SQL.QueryRowContext(context.Background(),
+			`select count(*) from two_factor_recovery_codes where user_id = ? and code_hash = ?`,
+			testLoginUserID, oldHash).Scan(&count); err != nil {
+			t.Fatalf("查询旧恢复码失败：%v", err)
+		}
+		if count != 0 {
+			t.Fatalf("旧恢复码 %q 仍存在", oldCode)
+		}
+	}
+	var auditCount int
+	if err := fixture.db.SQL.QueryRowContext(context.Background(),
+		`select count(*) from audit_events where event_type = 'two_factor_recovery_codes_regenerated' and user_id = ?`,
+		testLoginUserID).Scan(&auditCount); err != nil {
+		t.Fatalf("查询恢复码轮换审计失败：%v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("恢复码轮换审计数量 = %d", auditCount)
+	}
+
+	replay := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+		`{"password":"secret","code":"`+code+`"}`, "application/json", cookie)
+	if replay.Code != http.StatusUnauthorized || responseErrorCode(t, replay) != "invalid_two_factor_code" {
+		t.Fatalf("轮换 TOTP 重放响应 = %d %s", replay.Code, replay.Body.String())
+	}
+	if strings.Contains(replay.Body.String(), "recovery_codes") {
+		t.Fatal("TOTP 重放不应返回第二批恢复码")
+	}
+
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+	oldLogin := fixture.secondFactor(challenge, fixture.recoveryCode, "application/json")
+	if oldLogin.Code != http.StatusUnauthorized || responseErrorCode(t, oldLogin) != "invalid_two_factor_code" {
+		t.Fatalf("轮换后旧恢复码登录响应 = %d %s", oldLogin.Code, oldLogin.Body.String())
+	}
+	newLogin := fixture.secondFactor(challenge, response.RecoveryCodes[0], "application/json")
+	if newLogin.Code != http.StatusOK {
+		t.Fatalf("轮换后新恢复码登录状态码 = %d，响应=%s", newLogin.Code, newLogin.Body.String())
+	}
+}
+
+func TestTwoFactorDisableRevalidatesPasswordAndRejectsMissingEnabledState(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	cookie := fixture.authenticatedCookie()
+
+	wrong := fixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+		`{"password":"wrong"}`, "application/json", cookie)
+	if wrong.Code != http.StatusUnauthorized || responseErrorCode(t, wrong) != "invalid_credentials" {
+		t.Fatalf("关闭错误密码响应 = %d %s", wrong.Code, wrong.Body.String())
+	}
+	if _, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID); err != nil {
+		t.Fatalf("错误密码关闭了二因素：%v", err)
+	}
+
+	disabledFixture := newLoginTwoFactorFixture(t, false)
+	disabledCookie := disabledFixture.authenticatedCookie()
+	missing := disabledFixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+		`{"password":"secret"}`, "application/json", disabledCookie)
+	if missing.Code != http.StatusConflict || responseErrorCode(t, missing) != "two_factor_state_conflict" {
+		t.Fatalf("未启用关闭响应 = %d %s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestTwoFactorDisableRemovesCodesReportsDisabledAndRestoresPasswordLogin(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	cookie := fixture.authenticatedCookie()
+
+	rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+		`{"password":"secret"}`, "application/json", cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("关闭二因素状态码 = %d，响应=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]bool
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || !response["ok"] {
+		t.Fatalf("关闭二因素响应 = %#v, %v", response, err)
+	}
+	if _, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("关闭后已启用配置错误 = %v", err)
+	}
+	remaining, err := fixture.db.CountRecoveryCodes(context.Background(), testLoginUserID)
+	if err != nil || remaining != 0 {
+		t.Fatalf("关闭后恢复码数量 = %d, %v", remaining, err)
+	}
+	status := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+	if status.Code != http.StatusOK {
+		t.Fatalf("关闭后状态查询 = %d %s", status.Code, status.Body.String())
+	}
+	var statusResponse twoFactorStatusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &statusResponse); err != nil {
+		t.Fatalf("解析关闭后状态失败：%v", err)
+	}
+	if statusResponse.Enabled || statusResponse.RecoveryCodesRemaining != 0 {
+		t.Fatalf("关闭后状态 = %#v", statusResponse)
+	}
+	passwordLogin := fixture.passwordLogin(testLoginUsername, testLoginPassword)
+	if passwordLogin.Code != http.StatusOK || len(passwordLogin.Result().Cookies()) == 0 {
+		t.Fatalf("关闭后密码登录 = %d %s", passwordLogin.Code, passwordLogin.Body.String())
+	}
+	var auditCount int
+	if err := fixture.db.SQL.QueryRowContext(context.Background(),
+		`select count(*) from audit_events where event_type = 'two_factor_disabled' and user_id = ?`,
+		testLoginUserID).Scan(&auditCount); err != nil {
+		t.Fatalf("查询关闭二因素审计失败：%v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("关闭二因素审计数量 = %d", auditCount)
+	}
+}
+
+func TestTwoFactorManagementRoutesAllRequireAuthentication(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	for _, testCase := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/security/2fa"},
+		{method: http.MethodPost, path: "/api/security/2fa/setup"},
+		{method: http.MethodPost, path: "/api/security/2fa/enable"},
+		{method: http.MethodPost, path: "/api/security/2fa/recovery-codes"},
+		{method: http.MethodPost, path: "/api/security/2fa/disable"},
+	} {
+		t.Run(testCase.path, func(t *testing.T) {
+			rr := fixture.managementRequest(testCase.method, testCase.path, `{}`, "application/json", nil)
+			if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "unauthorized" {
+				t.Fatalf("未认证管理响应 = %d %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestTwoFactorManagementPOSTsReuseStrictBoundedJSONReader(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	for _, testCase := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "setup 未知字段", path: "/api/security/2fa/setup", body: `{"password":"secret","extra":true}`},
+		{name: "enable 重复字段", path: "/api/security/2fa/enable", body: `{"code":"000000","code":"111111"}`},
+		{name: "轮换尾随内容", path: "/api/security/2fa/recovery-codes", body: `{"password":"secret","code":"000000"} trailing`},
+		{name: "disable 多值", path: "/api/security/2fa/disable", body: `{"password":"secret"}{"password":"secret"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			rr := fixture.managementRequest(http.MethodPost, testCase.path, testCase.body, "application/json", cookie)
+			if rr.Code != http.StatusBadRequest || responseErrorCode(t, rr) != "invalid_json" {
+				t.Fatalf("严格 JSON 管理响应 = %d %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+
+	nonJSON := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "text/plain", cookie)
+	if nonJSON.Code != http.StatusUnsupportedMediaType || responseErrorCode(t, nonJSON) != "unsupported_media_type" {
+		t.Fatalf("管理非 JSON 响应 = %d %s", nonJSON.Code, nonJSON.Body.String())
+	}
+
+	const limit = 16 << 10
+	reader := &countingReader{reader: strings.NewReader(`{"password":"secret","extra":"` + strings.Repeat("x", limit*2) + `"}`)}
+	req := httptest.NewRequest(http.MethodPost, "/api/security/2fa/setup", reader)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge || responseErrorCode(t, rr) != "request_too_large" {
+		t.Fatalf("超大管理请求响应 = %d %s", rr.Code, rr.Body.String())
+	}
+	if reader.read > limit+1 {
+		t.Fatalf("超大管理请求读取 %d 字节，期望不超过 %d", reader.read, limit+1)
+	}
+}
+
+func TestTwoFactorStatusAndSetupStoreFailuresReturnUnavailable(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	if _, err := fixture.db.SQL.ExecContext(context.Background(), `drop table user_two_factor`); err != nil {
+		t.Fatalf("删除二因素表失败：%v", err)
+	}
+
+	status := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+	if status.Code != http.StatusInternalServerError || responseErrorCode(t, status) != "two_factor_unavailable" {
+		t.Fatalf("状态存储故障响应 = %d %s", status.Code, status.Body.String())
+	}
+	setup := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if setup.Code != http.StatusInternalServerError || responseErrorCode(t, setup) != "two_factor_unavailable" {
+		t.Fatalf("setup 存储故障响应 = %d %s", setup.Code, setup.Body.String())
+	}
+	if strings.Contains(setup.Body.String(), "manual_key") || strings.Contains(setup.Body.String(), "otpauth_uri") {
+		t.Fatal("setup 存储故障不应泄露新密钥")
+	}
+}
+
+func TestTwoFactorMutationStoreFailuresPreserveCommittedState(t *testing.T) {
+	t.Run("enable", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, false)
+		cookie := fixture.authenticatedCookie()
+		fixture.beginManagementSetup(cookie)
+		if _, err := fixture.db.SQL.ExecContext(context.Background(), `
+			create trigger fail_two_factor_enable before update on user_two_factor
+			begin select raise(fail, 'enable failed'); end`); err != nil {
+			t.Fatalf("创建 enable 失败触发器失败：%v", err)
+		}
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+			`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+		if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "two_factor_unavailable" {
+			t.Fatalf("enable 存储故障响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "recovery_codes") {
+			t.Fatal("enable 失败不应返回未提交恢复码")
+		}
+		if _, err := fixture.db.GetPendingTwoFactor(context.Background(), testLoginUserID, fixture.now); err != nil {
+			t.Fatalf("enable 失败未保留 pending：%v", err)
+		}
+		remaining, err := fixture.db.CountRecoveryCodes(context.Background(), testLoginUserID)
+		if err != nil || remaining != 0 {
+			t.Fatalf("enable 失败写入恢复码：%d, %v", remaining, err)
+		}
+	})
+
+	t.Run("recovery-codes", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, true)
+		cookie := fixture.authenticatedCookie()
+		fixture.now = fixture.now.Add(time.Duration(auth.TOTPPeriodSeconds) * time.Second)
+		if _, err := fixture.db.SQL.ExecContext(context.Background(), `
+			create trigger fail_recovery_rotation before update on user_two_factor
+			begin select raise(fail, 'rotation failed'); end`); err != nil {
+			t.Fatalf("创建轮换失败触发器失败：%v", err)
+		}
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+			`{"password":"secret","code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+		if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "two_factor_unavailable" {
+			t.Fatalf("轮换存储故障响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "recovery_codes") {
+			t.Fatal("轮换失败不应返回未提交恢复码")
+		}
+		remaining, err := fixture.db.CountRecoveryCodes(context.Background(), testLoginUserID)
+		if err != nil || remaining != 2 {
+			t.Fatalf("轮换失败未保留旧恢复码：%d, %v", remaining, err)
+		}
+	})
+
+	t.Run("disable", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, true)
+		cookie := fixture.authenticatedCookie()
+		if _, err := fixture.db.SQL.ExecContext(context.Background(), `
+			create trigger fail_two_factor_disable before delete on user_two_factor
+			begin select raise(fail, 'disable failed'); end`); err != nil {
+			t.Fatalf("创建 disable 失败触发器失败：%v", err)
+		}
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+			`{"password":"secret"}`, "application/json", cookie)
+		if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "two_factor_unavailable" {
+			t.Fatalf("disable 存储故障响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		if _, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID); err != nil {
+			t.Fatalf("disable 失败未保留启用配置：%v", err)
+		}
+		remaining, err := fixture.db.CountRecoveryCodes(context.Background(), testLoginUserID)
+		if err != nil || remaining != 2 {
+			t.Fatalf("disable 失败未回滚恢复码删除：%d, %v", remaining, err)
+		}
+	})
+}
+
+func TestTwoFactorAuditFailuresKeepCommittedManagementResultAuthoritative(t *testing.T) {
+	t.Run("enable still returns the only recovery code copy", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, false)
+		cookie := fixture.authenticatedCookie()
+		fixture.beginManagementSetup(cookie)
+		writer := &recordingFailingAuditWriter{err: errors.New("审计不可用")}
+		fixture.useAuditWriter(writer)
+
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+			`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("审计失败时 enable 响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		var response recoveryCodesResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || len(response.RecoveryCodes) != 10 {
+			t.Fatalf("审计失败时 enable 恢复码 = %#v, %v", response, err)
+		}
+		if len(writer.events) != 1 || writer.events[0].EventType != "two_factor_enabled" {
+			t.Fatalf("enable 审计尝试 = %#v", writer.events)
+		}
+		if _, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID); err != nil {
+			t.Fatalf("审计失败后 enable 未提交：%v", err)
+		}
+	})
+
+	t.Run("recovery rotation still returns the only new code copy", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, true)
+		cookie := fixture.authenticatedCookie()
+		fixture.now = fixture.now.Add(time.Duration(auth.TOTPPeriodSeconds) * time.Second)
+		writer := &recordingFailingAuditWriter{err: errors.New("审计不可用")}
+		fixture.useAuditWriter(writer)
+
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+			`{"password":"secret","code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("审计失败时轮换响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		var response recoveryCodesResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || len(response.RecoveryCodes) != 10 {
+			t.Fatalf("审计失败时轮换恢复码 = %#v, %v", response, err)
+		}
+		if len(writer.events) != 1 || writer.events[0].EventType != "two_factor_recovery_codes_regenerated" {
+			t.Fatalf("轮换审计尝试 = %#v", writer.events)
+		}
+		remaining, err := fixture.db.CountRecoveryCodes(context.Background(), testLoginUserID)
+		if err != nil || remaining != 10 {
+			t.Fatalf("审计失败后轮换未提交：%d, %v", remaining, err)
+		}
+	})
+
+	t.Run("disable remains successful after commit", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, true)
+		cookie := fixture.authenticatedCookie()
+		writer := &recordingFailingAuditWriter{err: errors.New("审计不可用")}
+		fixture.useAuditWriter(writer)
+
+		rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+			`{"password":"secret"}`, "application/json", cookie)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("审计失败时 disable 响应 = %d %s", rr.Code, rr.Body.String())
+		}
+		if len(writer.events) != 1 || writer.events[0].EventType != "two_factor_disabled" {
+			t.Fatalf("disable 审计尝试 = %#v", writer.events)
+		}
+		if _, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("审计失败后 disable 状态 = %v", err)
+		}
+	})
+}
+
+func TestTwoFactorCompleteManagementLifecycle(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+
+	initialStatus := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+	var status twoFactorStatusResponse
+	if initialStatus.Code != http.StatusOK || json.Unmarshal(initialStatus.Body.Bytes(), &status) != nil || status.Enabled {
+		t.Fatalf("初始二因素状态 = %d %s", initialStatus.Code, initialStatus.Body.String())
+	}
+	fixture.beginManagementSetup(cookie)
+	enable := fixture.managementRequest(http.MethodPost, "/api/security/2fa/enable",
+		`{"code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	var enabledCodes recoveryCodesResponse
+	if enable.Code != http.StatusOK || json.Unmarshal(enable.Body.Bytes(), &enabledCodes) != nil || len(enabledCodes.RecoveryCodes) != 10 {
+		t.Fatalf("完整流程 enable = %d %s", enable.Code, enable.Body.String())
+	}
+	enabledStatus := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+	status = twoFactorStatusResponse{}
+	if enabledStatus.Code != http.StatusOK || json.Unmarshal(enabledStatus.Body.Bytes(), &status) != nil || !status.Enabled || status.RecoveryCodesRemaining != 10 {
+		t.Fatalf("完整流程启用状态 = %d %s", enabledStatus.Code, enabledStatus.Body.String())
+	}
+
+	fixture.now = fixture.now.Add(time.Duration(auth.TOTPPeriodSeconds) * time.Second)
+	rotation := fixture.managementRequest(http.MethodPost, "/api/security/2fa/recovery-codes",
+		`{"password":"secret","code":"`+fixture.currentTOTP()+`"}`, "application/json", cookie)
+	var rotatedCodes recoveryCodesResponse
+	if rotation.Code != http.StatusOK || json.Unmarshal(rotation.Body.Bytes(), &rotatedCodes) != nil || len(rotatedCodes.RecoveryCodes) != 10 {
+		t.Fatalf("完整流程恢复码轮换 = %d %s", rotation.Code, rotation.Body.String())
+	}
+	disable := fixture.managementRequest(http.MethodPost, "/api/security/2fa/disable",
+		`{"password":"secret"}`, "application/json", cookie)
+	if disable.Code != http.StatusOK {
+		t.Fatalf("完整流程 disable = %d %s", disable.Code, disable.Body.String())
+	}
+	finalStatus := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+	status = twoFactorStatusResponse{}
+	if finalStatus.Code != http.StatusOK || json.Unmarshal(finalStatus.Body.Bytes(), &status) != nil || status.Enabled || status.RecoveryCodesRemaining != 0 {
+		t.Fatalf("完整流程最终状态 = %d %s", finalStatus.Code, finalStatus.Body.String())
+	}
+	passwordLogin := fixture.passwordLogin(testLoginUsername, testLoginPassword)
+	if passwordLogin.Code != http.StatusOK {
+		t.Fatalf("完整流程关闭后密码登录 = %d %s", passwordLogin.Code, passwordLogin.Body.String())
+	}
+	for _, eventType := range []string{
+		"two_factor_enabled",
+		"two_factor_recovery_codes_regenerated",
+		"two_factor_disabled",
+	} {
+		var count int
+		if err := fixture.db.SQL.QueryRowContext(context.Background(),
+			`select count(*) from audit_events where event_type = ? and user_id = ?`,
+			eventType, testLoginUserID).Scan(&count); err != nil {
+			t.Fatalf("查询完整流程审计 %s 失败：%v", eventType, err)
+		}
+		if count != 1 {
+			t.Fatalf("完整流程审计 %s 数量 = %d", eventType, count)
+		}
 	}
 }
 

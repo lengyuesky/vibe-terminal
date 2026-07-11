@@ -4,6 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView } from '../App';
 import * as api from '../api';
 
+vi.mock('../components/SecurityView', async (importOriginal) => {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return importOriginal<typeof import('../components/SecurityView')>();
+});
+
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return {
@@ -49,6 +54,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks();
   mockedApi.getTwoFactorStatus.mockResolvedValue({ enabled: false, recoveryCodesRemaining: 0 });
+  mockedApi.listAgentTokens.mockResolvedValue([]);
 });
 
 function loggedInAppViewProps(
@@ -421,9 +427,50 @@ describe('AppView', () => {
     security.focus();
     await userEvent.keyboard('{Enter}');
 
+    expect(screen.getByRole('status', { name: 'Loading security settings' })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
     expect(await screen.findByText('Two-factor authentication is disabled.')).toBeInTheDocument();
     expect(mockedApi.getTwoFactorStatus).toHaveBeenCalledOnce();
+  });
+
+  it('切换Security时保留TerminalTabs活动标签', async () => {
+    render(
+      <AppView
+        {...loggedInAppViewProps({
+          sessions: {
+            'dev-1': [
+              { id: 'session-first', title: 'first', status: 'running' },
+              { id: 'session-second', title: 'second', status: 'running' },
+            ],
+          },
+        })}
+      />
+    );
+
+    const second = screen.getByRole('tab', { name: /second/i });
+    await userEvent.click(second);
+    expect(second).toHaveAttribute('aria-selected', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Terminals' }));
+
+    expect(screen.getByRole('tab', { name: /second/i })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('切换Security时保留AgentToken草稿且不重复刷新', async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<AppView {...loggedInAppViewProps({ onRefreshAgentTokens: refresh })} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Agent Tokens' }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    const name = screen.getByLabelText('Token name');
+    await userEvent.clear(name);
+    await userEvent.type(name, 'draft-agent');
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    expect(name).not.toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: 'Agent Tokens' }));
+
+    expect(screen.getByLabelText('Token name')).toHaveValue('draft-agent');
+    expect(refresh).toHaveBeenCalledOnce();
   });
 
   it('标记当前导航并在Security往返时保留终端和Token状态', async () => {
@@ -506,6 +553,37 @@ describe('AppView', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page'));
     expect(screen.queryByRole('heading', { name: 'Two-factor security' })).not.toBeInTheDocument();
+  });
+
+  it('用户A的Security秘密和旧请求不能进入用户B子树', async () => {
+    const recoveryRequest = deferred<string[]>();
+    mockedApi.startTwoFactorSetup.mockResolvedValue({
+      manualKey: 'USER-A-MANUAL-SECRET',
+      otpauthURI: 'otpauth://totp/example?secret=USER-A-MANUAL-SECRET',
+      expiresAt: '2026-07-11T15:00:00Z',
+    });
+    mockedApi.enableTwoFactor.mockReturnValue(recoveryRequest.promise);
+    const props = loggedInAppViewProps();
+    const { rerender } = render(<AppView {...props} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Enable two-factor authentication' }));
+    await userEvent.type(screen.getByLabelText('Current password'), 'secret-a');
+    await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByText('USER-A-MANUAL-SECRET')).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Authenticator code'), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
+
+    rerender(<AppView {...props} user={{ id: 'user-2', username: 'operator' }} />);
+    expect(screen.queryByText('USER-A-MANUAL-SECRET')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Two-factor setup QR code' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page');
+
+    await act(async () => {
+      recoveryRequest.resolve(Array.from({ length: 10 }, (_, index) => `USER-A-RECOVERY-${index}`));
+      await recoveryRequest.promise;
+    });
+    expect(screen.queryByText('USER-A-RECOVERY-0')).not.toBeInTheDocument();
   });
 
   it('creates and revokes agent tokens from the management view', async () => {

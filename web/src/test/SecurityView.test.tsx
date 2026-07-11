@@ -134,7 +134,9 @@ describe('SecurityView', () => {
     await screen.findByText('Two-factor authentication is enabled.');
     await userEvent.click(screen.getByRole('button', { name: 'Disable two-factor authentication' }));
     await userEvent.type(screen.getByLabelText('Current password'), 'secret');
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm disable two-factor authentication' }));
+    const disable = screen.getByRole('button', { name: 'Confirm disable two-factor authentication' });
+    expect(disable).toHaveClass('dangerButton');
+    await userEvent.click(disable);
 
     await waitFor(() => expect(mockedAPI.disableTwoFactor).toHaveBeenCalledWith('secret'));
     expect(await screen.findByText('Two-factor authentication is disabled.')).toBeInTheDocument();

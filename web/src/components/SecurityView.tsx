@@ -435,7 +435,7 @@ export function SecurityView() {
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading || !password.trim()}>
+          <button className="dangerButton" type="submit" disabled={loading || !password.trim()}>
             Confirm disable two-factor authentication
           </button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>

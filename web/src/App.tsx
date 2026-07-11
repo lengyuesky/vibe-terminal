@@ -1,16 +1,19 @@
 import { KeyRound, Monitor, ShieldCheck, Terminal } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
 import { DeviceList } from './components/DeviceList';
 import { FileManagerPanel } from './components/FileManagerPanel';
 import { LoginView } from './components/LoginView';
-import { SecurityView } from './components/SecurityView';
 import { TerminalTabs } from './components/TerminalTabs';
 
 type SessionsByDevice = Record<string, Session[]>;
 type ViewMode = 'terminals' | 'agentTokens' | 'security';
+
+const SecurityView = lazy(() =>
+  import('./components/SecurityView').then((module) => ({ default: module.SecurityView }))
+);
 
 function enrichSessionDevice(session: Session, deviceId: string, device?: Device): Session {
   return {
@@ -185,25 +188,7 @@ export function App() {
   );
 }
 
-export function AppView({
-  user,
-  devices,
-  sessions,
-  onLogin,
-  onVerifyTwoFactor,
-  onCloseSession,
-  onCreateSession,
-  onRenameDevice = async () => undefined,
-  onRenameSession,
-  agentTokens,
-  createdAgentToken,
-  tokenLoading,
-  tokenError,
-  onCreateAgentToken,
-  onRevokeAgentToken,
-  onDeleteAgentToken = async () => {},
-  onRefreshAgentTokens,
-}: {
+type AppViewProps = {
   user: User | null;
   devices: Device[];
   sessions: SessionsByDevice;
@@ -221,7 +206,31 @@ export function AppView({
   onRevokeAgentToken: (id: string) => Promise<void>;
   onDeleteAgentToken?: (id: string) => Promise<void>;
   onRefreshAgentTokens: () => Promise<void>;
-}) {
+};
+
+export function AppView(props: AppViewProps) {
+  if (!props.user) {
+    return <LoginView onLogin={props.onLogin} onVerifyTwoFactor={props.onVerifyTwoFactor} />;
+  }
+  return <AuthenticatedAppView key={props.user.id} {...props} user={props.user} />;
+}
+
+function AuthenticatedAppView({
+  devices,
+  sessions,
+  onCloseSession,
+  onCreateSession,
+  onRenameDevice = async () => undefined,
+  onRenameSession,
+  agentTokens,
+  createdAgentToken,
+  tokenLoading,
+  tokenError,
+  onCreateAgentToken,
+  onRevokeAgentToken,
+  onDeleteAgentToken = async () => {},
+  onRefreshAgentTokens,
+}: Omit<AppViewProps, 'user'> & { user: User }) {
   const devicesById = useMemo(() => new Map(devices.map((device) => [device.id, device])), [devices]);
   const initialSessions = useMemo(
     () =>
@@ -235,7 +244,6 @@ export function AppView({
   const [localSessions, setLocalSessions] = useState<Session[]>(initialSessions);
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
   const [filesDevice, setFilesDevice] = useState<Device | null>(null);
-  const previousUserIDRef = useRef(user?.id);
 
   useEffect(() => {
     setLocalDevices(devices);
@@ -244,15 +252,6 @@ export function AppView({
   useEffect(() => {
     setLocalSessions(initialSessions);
   }, [initialSessions]);
-
-  useEffect(() => {
-    const userID = user?.id;
-    if (previousUserIDRef.current !== userID) {
-      previousUserIDRef.current = userID;
-      setViewMode('terminals');
-      setFilesDevice(null);
-    }
-  }, [user?.id]);
 
   async function createAndAppend(deviceId: string) {
     const session = await onCreateSession(deviceId);
@@ -277,7 +276,6 @@ export function AppView({
     );
   }
 
-  if (!user) return <LoginView onLogin={onLogin} onVerifyTwoFactor={onVerifyTwoFactor} />;
   return (
     <div className="shell">
       <aside className="devices">
@@ -322,14 +320,15 @@ export function AppView({
           compact
         />
       </aside>
-      {viewMode === 'terminals' ? (
+      <div className="viewPane" hidden={viewMode !== 'terminals'} aria-hidden={viewMode !== 'terminals'}>
         <TerminalTabs
           sessions={localSessions}
           onSessionsChange={setLocalSessions}
           onCloseSession={onCloseSession}
           onRenameSession={onRenameSession}
         />
-      ) : viewMode === 'agentTokens' ? (
+      </div>
+      <div className="viewPane" hidden={viewMode !== 'agentTokens'} aria-hidden={viewMode !== 'agentTokens'}>
         <AgentTokenManager
           tokens={agentTokens}
           loading={tokenLoading}
@@ -340,9 +339,18 @@ export function AppView({
           onDelete={onDeleteAgentToken}
           onRefresh={onRefreshAgentTokens}
         />
-      ) : (
+      </div>
+      {viewMode === 'security' && (
         <main className="securityPage">
-          <SecurityView />
+          <Suspense
+            fallback={(
+              <p className="securityLoading" role="status" aria-label="Loading security settings">
+                Loading security settings...
+              </p>
+            )}
+          >
+            <SecurityView />
+          </Suspense>
         </main>
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}

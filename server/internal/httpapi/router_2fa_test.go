@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -77,6 +78,8 @@ type recordingFailingAuditWriter struct {
 	events []store.AuditEvent
 }
 
+type auditWriterFunc func(context.Context, store.AuditEvent) error
+
 type countingReader struct {
 	reader *strings.Reader
 	read   int
@@ -95,6 +98,10 @@ func (w failingAuditWriter) Log(context.Context, store.AuditEvent) error {
 func (w *recordingFailingAuditWriter) Log(_ context.Context, event store.AuditEvent) error {
 	w.events = append(w.events, event)
 	return w.err
+}
+
+func (fn auditWriterFunc) Log(ctx context.Context, event store.AuditEvent) error {
+	return fn(ctx, event)
 }
 
 func newLoginTwoFactorFixture(t *testing.T, enabled bool) *loginTwoFactorFixture {
@@ -524,6 +531,57 @@ func TestTwoFactorSetupReplacesPendingButCannotOverwriteEnabledState(t *testing.
 	}
 }
 
+func TestConcurrentTwoFactorSetupAllowsOneWinner(t *testing.T) {
+	fixture := newConcurrentLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fixture.router().beforePendingTwoFactorSave = func() {
+		arrived <- struct{}{}
+		<-release
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			responses <- fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+				`{"password":"secret"}`, "application/json", cookie)
+		}()
+	}
+	for range 2 {
+		select {
+		case <-arrived:
+		case <-time.After(2 * time.Second):
+			t.Fatal("并发 setup 未同时到达保存屏障")
+		}
+	}
+	close(release)
+
+	var successes int
+	var conflicts int
+	for range 2 {
+		rr := <-responses
+		switch {
+		case rr.Code == http.StatusOK:
+			successes++
+		case rr.Code == http.StatusConflict && responseErrorCode(t, rr) == "two_factor_state_conflict":
+			conflicts++
+		default:
+			t.Fatalf("并发 setup 响应 = %d %s", rr.Code, rr.Body.String())
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("并发 setup：成功=%d，冲突=%d", successes, conflicts)
+	}
+
+	fixture.router().beforePendingTwoFactorSave = nil
+	sequential := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup",
+		`{"password":"secret"}`, "application/json", cookie)
+	if sequential.Code != http.StatusOK {
+		t.Fatalf("并发完成后的顺序 setup = %d %s", sequential.Code, sequential.Body.String())
+	}
+}
+
 func TestTwoFactorSetupUnavailableWithoutManager(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, false)
 	cookie := fixture.authenticatedCookie()
@@ -676,6 +734,28 @@ func TestTwoFactorRecoveryCodeRotationRequiresPasswordAndCurrentTOTP(t *testing.
 		if count != 1 {
 			t.Fatalf("错误凭据使旧恢复码 %q 失效", oldCode)
 		}
+	}
+}
+
+func TestRecoveryCodeRotationMapsStoreErrorsPrecisely(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		err        error
+		statusCode int
+		errorCode  string
+	}{
+		{name: "配置变化", err: store.ErrConflict, statusCode: http.StatusConflict, errorCode: "two_factor_state_conflict"},
+		{name: "计数器重放", err: store.ErrInvalidSecondFactor, statusCode: http.StatusUnauthorized, errorCode: "invalid_two_factor_code"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			if !writeRecoveryCodeRotationStoreError(rr, testCase.err) {
+				t.Fatalf("错误 %v 未被处理", testCase.err)
+			}
+			if rr.Code != testCase.statusCode || responseErrorCode(t, rr) != testCase.errorCode {
+				t.Fatalf("轮换错误映射 = %d %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 
@@ -846,6 +926,34 @@ func TestTwoFactorManagementRoutesAllRequireAuthentication(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRequireUserDistinguishesMissingUserFromStoreFailure(t *testing.T) {
+	t.Run("会话用户不存在返回未认证", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, false)
+		cookie := fixture.authenticatedCookie()
+		if _, err := fixture.db.SQL.ExecContext(context.Background(), `delete from users where id = ?`, testLoginUserID); err != nil {
+			t.Fatalf("删除会话用户失败：%v", err)
+		}
+
+		rr := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+		if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "unauthorized" {
+			t.Fatalf("会话用户不存在响应 = %d %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("用户存储故障返回认证不可用", func(t *testing.T) {
+		fixture := newLoginTwoFactorFixture(t, false)
+		cookie := fixture.authenticatedCookie()
+		if _, err := fixture.db.SQL.ExecContext(context.Background(), `drop table users`); err != nil {
+			t.Fatalf("删除用户表失败：%v", err)
+		}
+
+		rr := fixture.managementRequest(http.MethodGet, "/api/security/2fa", "", "", cookie)
+		if rr.Code != http.StatusInternalServerError || responseErrorCode(t, rr) != "authentication_unavailable" {
+			t.Fatalf("用户存储故障响应 = %d %s", rr.Code, rr.Body.String())
+		}
+	})
 }
 
 func TestTwoFactorManagementPOSTsReuseStrictBoundedJSONReader(t *testing.T) {
@@ -1052,6 +1160,57 @@ func TestTwoFactorAuditFailuresKeepCommittedManagementResultAuthoritative(t *tes
 			t.Fatalf("审计失败后 disable 状态 = %v", err)
 		}
 	})
+}
+
+func TestCommittedTwoFactorAuditIgnoresRequestCancellation(t *testing.T) {
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	req := httptest.NewRequest(http.MethodPost, "/api/security/2fa/enable", nil).WithContext(requestContext)
+
+	var observedErr error
+	var deadline time.Time
+	r := &router{audit: auditWriterFunc(func(ctx context.Context, event store.AuditEvent) error {
+		observedErr = ctx.Err()
+		deadline, _ = ctx.Deadline()
+		return nil
+	})}
+	r.auditCommittedTwoFactorChange(req, testLoginUserID, "two_factor_enabled", "two factor authentication enabled")
+
+	if observedErr != nil {
+		t.Fatalf("提交后审计继承了请求取消：%v", observedErr)
+	}
+	remaining := time.Until(deadline)
+	if remaining < 1500*time.Millisecond || remaining > 2100*time.Millisecond {
+		t.Fatalf("提交后审计截止时间剩余 %s，期望约 2 秒", remaining)
+	}
+}
+
+func TestCommittedTwoFactorAuditTimesOutAndLogsFailure(t *testing.T) {
+	var logBuffer bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logBuffer)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	var observedErr error
+	r := &router{audit: auditWriterFunc(func(ctx context.Context, event store.AuditEvent) error {
+		<-ctx.Done()
+		observedErr = ctx.Err()
+		return ctx.Err()
+	})}
+	req := httptest.NewRequest(http.MethodPost, "/api/security/2fa/disable", nil)
+	startedAt := time.Now()
+	r.auditCommittedTwoFactorChange(req, testLoginUserID, "two_factor_disabled", "two factor authentication disabled")
+	elapsed := time.Since(startedAt)
+
+	if !errors.Is(observedErr, context.DeadlineExceeded) {
+		t.Fatalf("提交后审计超时错误 = %v", observedErr)
+	}
+	if elapsed < 1800*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("提交后审计耗时 = %s，期望约 2 秒", elapsed)
+	}
+	if !strings.Contains(logBuffer.String(), "two_factor_disabled") || !strings.Contains(logBuffer.String(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("提交后审计失败日志 = %q", logBuffer.String())
+	}
 }
 
 func TestTwoFactorCompleteManagementLifecycle(t *testing.T) {

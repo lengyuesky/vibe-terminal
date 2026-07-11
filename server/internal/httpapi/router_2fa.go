@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -26,24 +28,13 @@ func (r *router) handleTwoFactorStatus(w http.ResponseWriter, req *http.Request)
 	if !ok {
 		return
 	}
-	if _, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID); errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"enabled":                  false,
-			"recovery_codes_remaining": 0,
-		})
-		return
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
-		return
-	}
-
-	remaining, err := r.store.CountRecoveryCodes(req.Context(), user.ID)
+	enabled, remaining, err := r.store.GetTwoFactorStatus(req.Context(), user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":                  true,
+		"enabled":                  enabled,
 		"recovery_codes_remaining": remaining,
 	})
 }
@@ -67,9 +58,13 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
-	if _, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID); err == nil {
+	current, err := r.store.GetUserTwoFactor(req.Context(), user.ID)
+	previousConfigurationID := ""
+	if err == nil && current.EnabledAt.Valid {
 		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
 		return
+	} else if err == nil {
+		previousConfigurationID = current.ConfigurationID
 	} else if !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
@@ -82,14 +77,17 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 	}
 	now := r.now().UTC()
 	expiresAt := now.Add(10 * time.Minute)
-	err = r.store.SavePendingTwoFactor(req.Context(), store.UserTwoFactor{
+	if r.beforePendingTwoFactorSave != nil {
+		r.beforePendingTwoFactorSave()
+	}
+	err = r.store.SavePendingTwoFactorIfUnchanged(req.Context(), store.UserTwoFactor{
 		UserID:           user.ID,
 		ConfigurationID:  uuid.NewString(),
 		SecretCiphertext: ciphertext,
 		SetupExpiresAt:   sql.NullTime{Time: expiresAt, Valid: true},
 		CreatedAt:        now,
 		UpdatedAt:        now,
-	})
+	}, previousConfigurationID)
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
 		return
@@ -220,8 +218,7 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 		codes[i] = store.RecoveryCodeInput{ID: uuid.NewString(), Hash: hash}
 	}
 	err = r.store.ReplaceRecoveryCodesAfterTOTP(req.Context(), user.ID, setting.ConfigurationID, counter, codes, now)
-	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+	if writeRecoveryCodeRotationStoreError(w, err) {
 		return
 	}
 	if err != nil {
@@ -230,6 +227,19 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 	}
 	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_recovery_codes_regenerated", "two factor recovery codes regenerated")
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": rawCodes})
+}
+
+func writeRecoveryCodeRotationStoreError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "two_factor_state_conflict", "two factor authentication state changed")
+		return true
+	case errors.Is(err, store.ErrInvalidSecondFactor):
+		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request) {
@@ -263,11 +273,15 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 // auditCommittedTwoFactorChange 在状态提交后尽力记录审计。
 // 此时不能再向客户端返回失败，否则启用或轮换成功后会丢失仅返回一次的恢复码。
 func (r *router) auditCommittedTwoFactorChange(req *http.Request, userID, eventType, summary string) {
-	_ = r.audit.Log(req.Context(), store.AuditEvent{
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), 2*time.Second)
+	defer cancel()
+	if err := r.audit.Log(ctx, store.AuditEvent{
 		UserID:    userID,
 		EventType: eventType,
 		Summary:   summary,
-	})
+	}); err != nil {
+		log.Printf("记录已提交的二因素审计失败：event_type=%s user_id=%s error=%v", eventType, userID, err)
+	}
 }
 
 func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) {

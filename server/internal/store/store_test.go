@@ -354,6 +354,119 @@ func TestConcurrentConsumeTOTPCounterAllowsExactlyOneWinner(t *testing.T) {
 	}
 }
 
+func TestReplaceRecoveryCodesDistinguishesConfigurationChangeFromCounterReplay(t *testing.T) {
+	ctx := context.Background()
+	db := newSnippetTestDB(t)
+	now := time.Date(2026, time.July, 10, 8, 3, 0, 0, time.UTC)
+	createEnabledTwoFactorFixture(t, ctx, db, "rotation-errors-user", "rotation-errors-configuration", 100, []RecoveryCodeInput{{
+		ID: "rotation-errors-old-code", Hash: "rotation-errors-old-hash",
+	}}, now)
+
+	err := db.ReplaceRecoveryCodesAfterTOTP(ctx, "rotation-errors-user", "stale-configuration", 101, []RecoveryCodeInput{{
+		ID: "rotation-errors-stale-code", Hash: "rotation-errors-stale-hash",
+	}}, now.Add(time.Minute))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("配置变化后的轮换错误 = %v，期望 ErrConflict", err)
+	}
+
+	err = db.ReplaceRecoveryCodesAfterTOTP(ctx, "rotation-errors-user", "rotation-errors-configuration", 100, []RecoveryCodeInput{{
+		ID: "rotation-errors-replay-code", Hash: "rotation-errors-replay-hash",
+	}}, now.Add(time.Minute))
+	if !errors.Is(err, ErrInvalidSecondFactor) {
+		t.Fatalf("计数器重放错误 = %v，期望 ErrInvalidSecondFactor", err)
+	}
+}
+
+func TestConcurrentRecoveryCodeRotationAndDisableRemainAtomic(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+
+	for iteration := 0; iteration < 5; iteration++ {
+		userID := fmt.Sprintf("rotation-disable-user-%d", iteration)
+		configurationID := fmt.Sprintf("rotation-disable-configuration-%d", iteration)
+		now := time.Date(2026, time.July, 10, 8, 4, iteration, 0, time.UTC)
+		createEnabledTwoFactorFixture(t, ctx, db, userID, configurationID, 100, []RecoveryCodeInput{{
+			ID: fmt.Sprintf("rotation-disable-old-code-%d", iteration), Hash: fmt.Sprintf("rotation-disable-old-hash-%d", iteration),
+		}}, now)
+
+		writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		errorsSeen := runConcurrentStoreCalls(t,
+			func() error {
+				return db.ReplaceRecoveryCodesAfterTOTP(writeCtx, userID, configurationID, 101, []RecoveryCodeInput{{
+					ID: fmt.Sprintf("rotation-disable-new-code-%d", iteration), Hash: fmt.Sprintf("rotation-disable-new-hash-%d", iteration),
+				}}, now.Add(time.Minute))
+			},
+			func() error { return db.DisableTwoFactor(writeCtx, userID) },
+		)
+		cancel()
+
+		var successes int
+		for _, err := range errorsSeen {
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, ErrConflict):
+			default:
+				t.Fatalf("轮换/关闭并发返回意外错误：%v", err)
+			}
+		}
+		if successes < 1 {
+			t.Fatalf("轮换/关闭并发结果 = %v，至少应有一个成功", errorsSeen)
+		}
+		if _, err := db.GetEnabledTwoFactor(ctx, userID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("轮换/关闭并发后启用配置错误 = %v，期望 ErrNotFound", err)
+		}
+		remaining, err := db.CountRecoveryCodes(ctx, userID)
+		if err != nil || remaining != 0 {
+			t.Fatalf("轮换/关闭并发后恢复码数量 = %d，错误=%v", remaining, err)
+		}
+	}
+}
+
+func TestConcurrentTwoFactorStatusAndDisableReturnsConsistentSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+
+	for iteration := 0; iteration < 10; iteration++ {
+		userID := fmt.Sprintf("status-disable-user-%d", iteration)
+		configurationID := fmt.Sprintf("status-disable-configuration-%d", iteration)
+		now := time.Date(2026, time.July, 10, 8, 5, iteration, 0, time.UTC)
+		createEnabledTwoFactorFixture(t, ctx, db, userID, configurationID, 100, []RecoveryCodeInput{{
+			ID: fmt.Sprintf("status-disable-code-%d", iteration), Hash: fmt.Sprintf("status-disable-hash-%d", iteration),
+		}}, now)
+
+		type statusResult struct {
+			enabled   bool
+			remaining int
+			err       error
+		}
+		start := make(chan struct{})
+		statusResults := make(chan statusResult, 1)
+		disableResults := make(chan error, 1)
+		go func() {
+			<-start
+			enabled, remaining, err := db.GetTwoFactorStatus(ctx, userID)
+			statusResults <- statusResult{enabled: enabled, remaining: remaining, err: err}
+		}()
+		go func() {
+			<-start
+			disableResults <- db.DisableTwoFactor(ctx, userID)
+		}()
+		close(start)
+
+		status := <-statusResults
+		if status.err != nil {
+			t.Fatalf("状态/关闭并发查询错误：%v", status.err)
+		}
+		if status.enabled && status.remaining != 1 || !status.enabled && status.remaining != 0 {
+			t.Fatalf("状态/关闭并发快照 = enabled:%t remaining:%d", status.enabled, status.remaining)
+		}
+		if err := <-disableResults; err != nil {
+			t.Fatalf("状态/关闭并发关闭错误：%v", err)
+		}
+	}
+}
+
 func TestConcurrentConsumeRecoveryCodeAllowsExactlyOneWinner(t *testing.T) {
 	ctx := context.Background()
 	db := openConcurrentStore(t, ctx)
@@ -409,7 +522,7 @@ func TestConcurrentReplaceRecoveryCodesAllowsExactlyOneWinner(t *testing.T) {
 			},
 		)
 		cancel()
-		assertConcurrentDomainResults(t, errorsSeen, ErrConflict)
+		assertConcurrentDomainResults(t, errorsSeen, ErrInvalidSecondFactor)
 
 		enabled, err := db.GetEnabledTwoFactor(ctx, userID)
 		if err != nil {
@@ -1458,8 +1571,8 @@ func TestReplaceRecoveryCodesReplayPreservesOldCodes(t *testing.T) {
 	err = db.ReplaceRecoveryCodesAfterTOTP(ctx, "replay-user", "replay-configuration", 100, []RecoveryCodeInput{
 		{ID: "replay-new-code", Hash: "replay-new-hash"},
 	}, now.Add(time.Minute))
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("replace with replayed counter error = %v, want ErrConflict", err)
+	if !errors.Is(err, ErrInvalidSecondFactor) {
+		t.Fatalf("replace with replayed counter error = %v, want ErrInvalidSecondFactor", err)
 	}
 	if err := db.ConsumeRecoveryCode(ctx, "replay-user", "replay-old-hash", now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("old recovery code was not preserved: %v", err)

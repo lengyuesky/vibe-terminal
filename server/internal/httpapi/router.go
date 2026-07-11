@@ -58,20 +58,21 @@ type Deps struct {
 }
 
 type router struct {
-	store            *store.DB
-	sessions         *auth.SessionManager
-	twoFactor        *auth.TwoFactorManager
-	passwordLimiter  *auth.FailureLimiter
-	twoFactorLimiter *auth.FailureLimiter
-	now              func() time.Time
-	presence         *devices.Presence
-	audit            AuditWriter
-	hub              *wshub.Hub
-	output           terminal.OutputStore
-	static           http.FileSystem
-	files            FsService
-	fsMaxUpload      int64
-	mux              *http.ServeMux
+	store                      *store.DB
+	sessions                   *auth.SessionManager
+	twoFactor                  *auth.TwoFactorManager
+	passwordLimiter            *auth.FailureLimiter
+	twoFactorLimiter           *auth.FailureLimiter
+	beforePendingTwoFactorSave func()
+	now                        func() time.Time
+	presence                   *devices.Presence
+	audit                      AuditWriter
+	hub                        *wshub.Hub
+	output                     terminal.OutputStore
+	static                     http.FileSystem
+	files                      FsService
+	fsMaxUpload                int64
+	mux                        *http.ServeMux
 }
 
 func NewRouter(deps Deps) http.Handler {
@@ -1303,8 +1304,12 @@ func (r *router) requireUser(w http.ResponseWriter, req *http.Request) (store.Us
 		return store.User{}, false
 	}
 	user, err := r.store.GetUserByID(req.Context(), userID)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "login required")
+		return store.User{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "authentication_unavailable", "authentication is unavailable")
 		return store.User{}, false
 	}
 	return user, true

@@ -400,20 +400,7 @@ func (db *DB) ConsumeLoginSecondFactor(ctx context.Context, params ConsumeLoginS
 
 // SavePendingTwoFactor 保存尚待用户确认的双因素认证配置。
 func (db *DB) SavePendingTwoFactor(ctx context.Context, setting UserTwoFactor) error {
-	now := time.Now().UTC()
-	if setting.SetupExpiresAt.Valid {
-		setting.SetupExpiresAt.Time = setting.SetupExpiresAt.Time.UTC()
-	}
-	if setting.CreatedAt.IsZero() {
-		setting.CreatedAt = now
-	} else {
-		setting.CreatedAt = setting.CreatedAt.UTC()
-	}
-	if setting.UpdatedAt.IsZero() {
-		setting.UpdatedAt = now
-	} else {
-		setting.UpdatedAt = setting.UpdatedAt.UTC()
-	}
+	normalizePendingTwoFactor(&setting)
 	result, err := db.SQL.ExecContext(ctx,
 		`insert into user_two_factor (
 			user_id, configuration_id, secret_ciphertext, setup_expires_at,
@@ -429,17 +416,60 @@ func (db *DB) SavePendingTwoFactor(ctx context.Context, setting UserTwoFactor) e
 		where user_two_factor.enabled_at is null`,
 		setting.UserID, setting.ConfigurationID, setting.SecretCiphertext, setting.SetupExpiresAt,
 		setting.CreatedAt, setting.UpdatedAt)
-	if err != nil {
-		return err
+	return requireAffected(result, err, ErrConflict)
+}
+
+// SavePendingTwoFactorIfUnchanged 仅在调用方观察到的待确认版本未变化时保存配置。
+func (db *DB) SavePendingTwoFactorIfUnchanged(ctx context.Context, setting UserTwoFactor, previousConfigurationID string) error {
+	normalizePendingTwoFactor(&setting)
+	var result sql.Result
+	var err error
+	if previousConfigurationID == "" {
+		result, err = db.SQL.ExecContext(ctx,
+			`insert into user_two_factor (
+				user_id, configuration_id, secret_ciphertext, setup_expires_at,
+				enabled_at, last_totp_counter, created_at, updated_at
+			) values (?, ?, ?, ?, null, null, ?, ?)
+			on conflict(user_id) do nothing`,
+			setting.UserID, setting.ConfigurationID, setting.SecretCiphertext, setting.SetupExpiresAt,
+			setting.CreatedAt, setting.UpdatedAt)
+	} else {
+		result, err = db.SQL.ExecContext(ctx,
+			`update user_two_factor set
+				configuration_id = ?, secret_ciphertext = ?, setup_expires_at = ?,
+				enabled_at = null, last_totp_counter = null, updated_at = ?
+			where user_id = ? and configuration_id = ? and enabled_at is null`,
+			setting.ConfigurationID, setting.SecretCiphertext, setting.SetupExpiresAt, setting.UpdatedAt,
+			setting.UserID, previousConfigurationID)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
+	return requireAffected(result, err, ErrConflict)
+}
+
+func normalizePendingTwoFactor(setting *UserTwoFactor) {
+	now := time.Now().UTC()
+	if setting.SetupExpiresAt.Valid {
+		setting.SetupExpiresAt.Time = setting.SetupExpiresAt.Time.UTC()
 	}
-	if affected == 0 {
-		return ErrConflict
+	if setting.CreatedAt.IsZero() {
+		setting.CreatedAt = now
+	} else {
+		setting.CreatedAt = setting.CreatedAt.UTC()
 	}
-	return nil
+	if setting.UpdatedAt.IsZero() {
+		setting.UpdatedAt = now
+	} else {
+		setting.UpdatedAt = setting.UpdatedAt.UTC()
+	}
+}
+
+// GetUserTwoFactor 返回用户当前的二因素记录，无论其处于待确认还是已启用状态。
+func (db *DB) GetUserTwoFactor(ctx context.Context, userID string) (UserTwoFactor, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select user_id, configuration_id, secret_ciphertext, setup_expires_at,
+			enabled_at, last_totp_counter, created_at, updated_at
+		from user_two_factor where user_id = ?`,
+		userID)
+	return scanUserTwoFactor(row)
 }
 
 func (db *DB) GetEnabledTwoFactor(ctx context.Context, userID string) (UserTwoFactor, error) {
@@ -517,6 +547,20 @@ func (db *DB) CountRecoveryCodes(ctx context.Context, userID string) (int, error
 	return count, err
 }
 
+// GetTwoFactorStatus 在一个数据库快照中返回启用状态和剩余恢复码数量。
+func (db *DB) GetTwoFactorStatus(ctx context.Context, userID string) (bool, int, error) {
+	var enabledCount int
+	var remaining int
+	err := db.SQL.QueryRowContext(ctx,
+		`select count(distinct settings.user_id), count(codes.id)
+		 from user_two_factor settings
+		 left join two_factor_recovery_codes codes
+		   on codes.user_id = settings.user_id and codes.used_at is null
+		 where settings.user_id = ? and settings.enabled_at is not null`,
+		userID).Scan(&enabledCount, &remaining)
+	return enabledCount != 0, remaining, err
+}
+
 // ReplaceRecoveryCodesAfterTOTP 在消费新的 TOTP 计数器后原子轮换恢复码。
 func (db *DB) ReplaceRecoveryCodesAfterTOTP(ctx context.Context, userID, configurationID string, counter int64, codes []RecoveryCodeInput, now time.Time) error {
 	now = now.UTC()
@@ -531,8 +575,30 @@ func (db *DB) ReplaceRecoveryCodesAfterTOTP(ctx context.Context, userID, configu
 		 where user_id = ? and configuration_id = ? and enabled_at is not null
 		 and (last_totp_counter is null or last_totp_counter < ?)`,
 		counter, now, userID, configurationID, counter)
-	if err := requireAffected(result, err, ErrConflict); err != nil {
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		var currentConfigurationID string
+		var currentCounter sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`select configuration_id, last_totp_counter
+			 from user_two_factor where user_id = ? and enabled_at is not null`,
+			userID).Scan(&currentConfigurationID, &currentCounter)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && currentConfigurationID != configurationID {
+			return ErrConflict
+		}
+		if err != nil {
+			return err
+		}
+		if currentCounter.Valid && currentCounter.Int64 >= counter {
+			return ErrInvalidSecondFactor
+		}
+		return ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `delete from two_factor_recovery_codes where user_id = ?`, userID); err != nil {
 		return err

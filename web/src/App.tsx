@@ -1,6 +1,6 @@
 import { KeyRound, Monitor, Terminal } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentToken, CreatedAgentToken, Device, Session, User } from './api';
+import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
 import { DeviceList } from './components/DeviceList';
@@ -66,9 +66,14 @@ export function App() {
     };
   }, [user]);
 
-  async function handleLogin(username: string, password: string) {
-    const loggedIn = await api.login(username, password);
-    setUser(loggedIn);
+  async function handleLogin(username: string, password: string): Promise<LoginResult> {
+    const result = await api.login(username, password);
+    if (result.status === 'authenticated') setUser(result.user);
+    return result;
+  }
+
+  async function handleVerifyTwoFactor(challengeToken: string, code: string) {
+    setUser(await api.verifyTwoFactor(challengeToken, code));
   }
 
   async function handleCreateSession(deviceId: string) {
@@ -142,6 +147,7 @@ export function App() {
       devices={devices}
       sessions={sessions}
       onLogin={handleLogin}
+      onVerifyTwoFactor={handleVerifyTwoFactor}
       onCloseSession={handleCloseSession}
       onCreateSession={handleCreateSession}
       onRenameDevice={handleRenameDevice}
@@ -163,6 +169,9 @@ export function AppView({
   devices,
   sessions,
   onLogin,
+  onVerifyTwoFactor = async () => {
+    throw new Error('two-factor verification is unavailable');
+  },
   onCloseSession,
   onCreateSession,
   onRenameDevice = async () => undefined,
@@ -179,7 +188,8 @@ export function AppView({
   user: User | null;
   devices: Device[];
   sessions: SessionsByDevice;
-  onLogin: (username: string, password: string) => Promise<void>;
+  onLogin: (username: string, password: string) => Promise<LoginResult>;
+  onVerifyTwoFactor?: (challengeToken: string, code: string) => Promise<void>;
   onCloseSession: (sessionId: string) => Promise<void>;
   onCreateSession: (deviceId: string) => Promise<Session | void>;
   onRenameDevice?: (deviceId: string, name: string) => Promise<Device | void>;
@@ -238,7 +248,7 @@ export function AppView({
     );
   }
 
-  if (!user) return <LoginView onLogin={onLogin} />;
+  if (!user) return <LoginView onLogin={onLogin} onVerifyTwoFactor={onVerifyTwoFactor} />;
   return (
     <div className="shell">
       <aside className="devices">

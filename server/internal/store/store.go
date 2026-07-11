@@ -47,6 +47,16 @@ type UserTwoFactor struct {
 	UpdatedAt        time.Time
 }
 
+// LoginChallenge 保存可由任意服务实例原子消费的网页登录挑战。
+type LoginChallenge struct {
+	JTI             string
+	UserID          string
+	ConfigurationID string
+	ExpiresAt       time.Time
+	ConsumedAt      sql.NullTime
+	CreatedAt       time.Time
+}
+
 // RecoveryCodeInput 表示待持久化的恢复码标识和哈希。
 type RecoveryCodeInput struct {
 	ID   string
@@ -173,6 +183,14 @@ func (db *DB) Migrate(ctx context.Context) error {
 			created_at datetime not null,
 			unique(user_id, code_hash)
 		)`,
+		`create table if not exists login_challenges (
+			jti text primary key,
+			user_id text not null references users(id) on delete cascade,
+			configuration_id text not null,
+			expires_at datetime not null,
+			consumed_at datetime,
+			created_at datetime not null
+		)`,
 		`create table if not exists agent_tokens (
 			id text primary key,
 			name text not null,
@@ -277,6 +295,49 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return user, err
+}
+
+// CreateLoginChallenge 持久化尚未消费的登录挑战。
+func (db *DB) CreateLoginChallenge(ctx context.Context, challenge LoginChallenge) error {
+	challenge.ExpiresAt = challenge.ExpiresAt.UTC()
+	if challenge.CreatedAt.IsZero() {
+		challenge.CreatedAt = time.Now().UTC()
+	} else {
+		challenge.CreatedAt = challenge.CreatedAt.UTC()
+	}
+	_, err := db.SQL.ExecContext(ctx,
+		`insert into login_challenges (jti, user_id, configuration_id, expires_at, consumed_at, created_at)
+		 values (?, ?, ?, ?, null, ?)`,
+		challenge.JTI, challenge.UserID, challenge.ConfigurationID, challenge.ExpiresAt, challenge.CreatedAt)
+	return err
+}
+
+// GetActiveLoginChallenge 返回未消费且尚未过期的登录挑战。
+func (db *DB) GetActiveLoginChallenge(ctx context.Context, jti, userID, configurationID string, now time.Time) (LoginChallenge, error) {
+	row := db.SQL.QueryRowContext(ctx,
+		`select jti, user_id, configuration_id, expires_at, consumed_at, created_at
+		 from login_challenges
+		 where jti = ? and user_id = ? and configuration_id = ?
+		 and consumed_at is null and expires_at >= ?`,
+		jti, userID, configurationID, now.UTC())
+	var challenge LoginChallenge
+	err := row.Scan(&challenge.JTI, &challenge.UserID, &challenge.ConfigurationID,
+		&challenge.ExpiresAt, &challenge.ConsumedAt, &challenge.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LoginChallenge{}, ErrNotFound
+	}
+	return challenge, err
+}
+
+// ConsumeLoginChallenge 原子标记挑战已消费，防止跨进程重复登录。
+func (db *DB) ConsumeLoginChallenge(ctx context.Context, jti, userID, configurationID string, now time.Time) error {
+	now = now.UTC()
+	result, err := db.SQL.ExecContext(ctx,
+		`update login_challenges set consumed_at = ?
+		 where jti = ? and user_id = ? and configuration_id = ?
+		 and consumed_at is null and expires_at >= ?`,
+		now, jti, userID, configurationID, now)
+	return requireAffected(result, err, ErrConflict)
 }
 
 // SavePendingTwoFactor 保存尚待用户确认的双因素认证配置。

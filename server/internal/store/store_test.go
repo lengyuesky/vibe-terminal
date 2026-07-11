@@ -62,6 +62,72 @@ func TestOpenConfiguresPragmasOnEveryConnection(t *testing.T) {
 	}
 }
 
+func TestLoginChallengeLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 8, 0, 0, 0, time.UTC)
+	if _, err := db.CreateUser(ctx, User{ID: "challenge-user", Username: "challenge-user", PasswordHash: "hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	challenge := LoginChallenge{
+		JTI:             "challenge-jti",
+		UserID:          "challenge-user",
+		ConfigurationID: "challenge-configuration",
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}
+	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+	active, err := db.GetActiveLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now)
+	if err != nil {
+		t.Fatalf("get active login challenge: %v", err)
+	}
+	if active.JTI != challenge.JTI || active.UserID != challenge.UserID || active.ConfigurationID != challenge.ConfigurationID {
+		t.Fatalf("active login challenge = %#v, want %#v", active, challenge)
+	}
+	if err := db.ConsumeLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("consume login challenge: %v", err)
+	}
+	if _, err := db.GetActiveLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consumed challenge lookup error = %v, want ErrNotFound", err)
+	}
+	if err := db.ConsumeLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reconsume login challenge error = %v, want ErrConflict", err)
+	}
+}
+
+func TestConcurrentConsumeLoginChallengeAllowsExactlyOneWinner(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 8, 0, 0, 0, time.UTC)
+	if _, err := db.CreateUser(ctx, User{ID: "concurrent-challenge-user", Username: "concurrent-challenge-user", PasswordHash: "hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	challenge := LoginChallenge{
+		JTI:             "concurrent-challenge-jti",
+		UserID:          "concurrent-challenge-user",
+		ConfigurationID: "concurrent-challenge-configuration",
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}
+	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	errorsSeen := runConcurrentStoreCalls(t,
+		func() error {
+			return db.ConsumeLoginChallenge(writeCtx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute))
+		},
+		func() error {
+			return db.ConsumeLoginChallenge(writeCtx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute))
+		},
+	)
+	cancel()
+	assertConcurrentDomainResults(t, errorsSeen, ErrConflict)
+}
+
 func TestConcurrentConsumeTOTPCounterAllowsExactlyOneWinner(t *testing.T) {
 	ctx := context.Background()
 	db := openConcurrentStore(t, ctx)
@@ -313,6 +379,11 @@ func TestDeleteUserCascadesTwoFactorRowsOnPooledConnection(t *testing.T) {
 		"recovery-code-1", "cascade-user", "recovery-hash-1", time.Now().UTC()); err != nil {
 		t.Fatalf("insert recovery code: %v", err)
 	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`insert into login_challenges (jti, user_id, configuration_id, expires_at, created_at) values (?, ?, ?, ?, ?)`,
+		"cascade-challenge", "cascade-user", "cascade-configuration", time.Now().UTC().Add(time.Hour), time.Now().UTC()); err != nil {
+		t.Fatalf("insert login challenge: %v", err)
+	}
 
 	first, err := db.SQL.Conn(ctx)
 	if err != nil {
@@ -336,7 +407,7 @@ func TestDeleteUserCascadesTwoFactorRowsOnPooledConnection(t *testing.T) {
 		t.Fatalf("close first connection: %v", err)
 	}
 
-	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes"} {
+	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes", "login_challenges"} {
 		var count int
 		if err := db.SQL.QueryRowContext(ctx, `select count(*) from `+table+` where user_id = ?`, "cascade-user").Scan(&count); err != nil {
 			t.Fatalf("count %s rows: %v", table, err)
@@ -376,7 +447,7 @@ func TestMigrateCreatesTwoFactorTables(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes"} {
+	for _, table := range []string{"user_two_factor", "two_factor_recovery_codes", "login_challenges"} {
 		var name string
 		err := db.SQL.QueryRowContext(ctx, `select name from sqlite_master where type='table' and name=?`, table).Scan(&name)
 		if err != nil {

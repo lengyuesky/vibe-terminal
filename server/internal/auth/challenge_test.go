@@ -141,7 +141,7 @@ func TestLoginChallengeRoundTripPreservesConfigurationID(t *testing.T) {
 	if err := json.Unmarshal(payloadJSON, &payloadFields); err != nil {
 		t.Fatalf("解析登录挑战载荷失败：%v", err)
 	}
-	wantFields := []string{"version", "user_id", "configuration_id", "issued_at", "expires_at"}
+	wantFields := []string{"version", "jti", "user_id", "configuration_id", "issued_at", "expires_at"}
 	if len(payloadFields) != len(wantFields) {
 		t.Fatalf("登录挑战载荷字段数量 = %d，期望 %d", len(payloadFields), len(wantFields))
 	}
@@ -155,8 +155,11 @@ func TestLoginChallengeRoundTripPreservesConfigurationID(t *testing.T) {
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		t.Fatalf("解析登录挑战载荷字段失败：%v", err)
 	}
-	if loginChallengeVersion != 1 || payload.Version != loginChallengeVersion {
+	if loginChallengeVersion != 2 || payload.Version != loginChallengeVersion {
 		t.Fatalf("登录挑战版本 = %d，期望 %d", payload.Version, loginChallengeVersion)
+	}
+	if payload.JTI == "" {
+		t.Fatal("登录挑战载荷缺少随机 JTI")
 	}
 	if payload.UserID != "user-1" {
 		t.Fatalf("载荷用户 ID = %q，期望 %q", payload.UserID, "user-1")
@@ -178,6 +181,9 @@ func TestLoginChallengeRoundTripPreservesConfigurationID(t *testing.T) {
 	if challenge.UserID != "user-1" {
 		t.Fatalf("挑战用户 ID = %q，期望 %q", challenge.UserID, "user-1")
 	}
+	if challenge.JTI != payload.JTI {
+		t.Fatalf("挑战 JTI = %q，期望 %q", challenge.JTI, payload.JTI)
+	}
 	if challenge.ConfigurationID != "configuration-1" {
 		t.Fatalf("挑战配置 ID = %q，期望 %q", challenge.ConfigurationID, "configuration-1")
 	}
@@ -186,6 +192,34 @@ func TestLoginChallengeRoundTripPreservesConfigurationID(t *testing.T) {
 	}
 	if !challenge.ExpiresAt.Equal(now.UTC().Add(5*time.Minute)) || challenge.ExpiresAt.Location() != time.UTC {
 		t.Fatalf("挑战过期时间 = %v，期望 UTC 时间 %v", challenge.ExpiresAt, now.UTC().Add(5*time.Minute))
+	}
+}
+
+func TestLoginChallengesUseUniqueJTI(t *testing.T) {
+	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
+	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("创建双因素管理器失败：%v", err)
+	}
+
+	firstToken, err := manager.IssueLoginChallenge("user-1", "configuration-1")
+	if err != nil {
+		t.Fatalf("签发第一个登录挑战失败：%v", err)
+	}
+	secondToken, err := manager.IssueLoginChallenge("user-1", "configuration-1")
+	if err != nil {
+		t.Fatalf("签发第二个登录挑战失败：%v", err)
+	}
+	first, err := manager.VerifyLoginChallenge(firstToken)
+	if err != nil {
+		t.Fatalf("验证第一个登录挑战失败：%v", err)
+	}
+	second, err := manager.VerifyLoginChallenge(secondToken)
+	if err != nil {
+		t.Fatalf("验证第二个登录挑战失败：%v", err)
+	}
+	if first.JTI == "" || second.JTI == "" || first.JTI == second.JTI {
+		t.Fatalf("登录挑战 JTI 不唯一：first=%q second=%q", first.JTI, second.JTI)
 	}
 }
 
@@ -240,6 +274,7 @@ func TestLoginChallengeExpirationBoundary(t *testing.T) {
 	}
 	token := signChallengePayloadForTest(t, manager, challengePayload{
 		Version:         loginChallengeVersion,
+		JTI:             "expiration-boundary-jti",
 		UserID:          "user-1",
 		ConfigurationID: "configuration-1",
 		IssuedAt:        now.Add(-5 * time.Minute).Unix(),
@@ -264,6 +299,7 @@ func TestLoginChallengeIssuedAtClockSkewBoundary(t *testing.T) {
 
 	atBoundary := signChallengePayloadForTest(t, manager, challengePayload{
 		Version:         loginChallengeVersion,
+		JTI:             "clock-skew-boundary-jti",
 		UserID:          "user-1",
 		ConfigurationID: "configuration-1",
 		IssuedAt:        now.Add(time.Minute).Unix(),
@@ -275,6 +311,7 @@ func TestLoginChallengeIssuedAtClockSkewBoundary(t *testing.T) {
 
 	beyondBoundary := signChallengePayloadForTest(t, manager, challengePayload{
 		Version:         loginChallengeVersion,
+		JTI:             "clock-skew-beyond-jti",
 		UserID:          "user-1",
 		ConfigurationID: "configuration-1",
 		IssuedAt:        now.Add(time.Minute + time.Second).Unix(),
@@ -314,6 +351,7 @@ func TestLoginChallengeRejectsMalformedAndInvalidPayloads(t *testing.T) {
 	}
 	validPayload := challengePayload{
 		Version:         loginChallengeVersion,
+		JTI:             "valid-jti",
 		UserID:          "user-1",
 		ConfigurationID: "configuration-1",
 		IssuedAt:        now.Unix(),
@@ -331,16 +369,19 @@ func TestLoginChallengeRejectsMalformedAndInvalidPayloads(t *testing.T) {
 		{name: "载荷不是 RawURL Base64", token: signChallengeSegmentForTest(manager, "%")},
 		{name: "载荷不是 JSON", token: signChallengeSegmentForTest(manager, base64.RawURLEncoding.EncodeToString([]byte("not-json")))},
 		{name: "版本不受支持", token: signChallengePayloadForTest(t, manager, challengePayload{
-			Version: 2, UserID: "user-1", ConfigurationID: "configuration-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
+			Version: 1, JTI: "unsupported-version-jti", UserID: "user-1", ConfigurationID: "configuration-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
+		})},
+		{name: "JTI 为空", token: signChallengePayloadForTest(t, manager, challengePayload{
+			Version: loginChallengeVersion, UserID: "user-1", ConfigurationID: "configuration-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
 		})},
 		{name: "用户 ID 为空", token: signChallengePayloadForTest(t, manager, challengePayload{
-			Version: loginChallengeVersion, ConfigurationID: "configuration-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
+			Version: loginChallengeVersion, JTI: "missing-user-jti", ConfigurationID: "configuration-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
 		})},
 		{name: "配置 ID 为空", token: signChallengePayloadForTest(t, manager, challengePayload{
-			Version: loginChallengeVersion, UserID: "user-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
+			Version: loginChallengeVersion, JTI: "missing-configuration-jti", UserID: "user-1", IssuedAt: now.Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
 		})},
 		{name: "签发时间超过时钟容差", token: signChallengePayloadForTest(t, manager, challengePayload{
-			Version: loginChallengeVersion, UserID: "user-1", ConfigurationID: "configuration-1", IssuedAt: now.Add(time.Minute + time.Second).Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
+			Version: loginChallengeVersion, JTI: "clock-skew-jti", UserID: "user-1", ConfigurationID: "configuration-1", IssuedAt: now.Add(time.Minute + time.Second).Unix(), ExpiresAt: now.Add(5 * time.Minute).Unix(),
 		})},
 	}
 

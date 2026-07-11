@@ -269,7 +269,9 @@ func TestCreateSessionRequiresOnlineDevice(t *testing.T) {
 		Sessions: auth.NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour),
 	})
 	loginRR := httptest.NewRecorder()
-	router.ServeHTTP(loginRR, httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`)))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(loginRR, loginReq)
 	req := httptest.NewRequest(http.MethodPost, "/api/devices/dev-1/sessions", bytes.NewBufferString(`{"shell_path":"/bin/bash","working_directory":"/home/dev","cols":80,"rows":24}`))
 	req.Header.Set("Content-Type", "application/json")
 	for _, cookie := range loginRR.Result().Cookies() {
@@ -378,7 +380,9 @@ func TestSessionCloseIsHiddenFromListAndRenameUpdatesTitle(t *testing.T) {
 	})
 	rt := handler.(*router)
 	loginRR := httptest.NewRecorder()
-	handler.ServeHTTP(loginRR, httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`)))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(loginRR, loginReq)
 	cookies := loginRR.Result().Cookies()
 
 	renameReq := httptest.NewRequest(http.MethodPatch, "/api/sessions/sess-1", bytes.NewBufferString(`{"title":"project shell"}`))
@@ -574,7 +578,9 @@ func TestSessionOutputIncludesPersistedData(t *testing.T) {
 		}},
 	})
 	loginRR := httptest.NewRecorder()
-	router.ServeHTTP(loginRR, httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`)))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(loginRR, loginReq)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/sess-1/output", nil)
 	for _, cookie := range loginRR.Result().Cookies() {

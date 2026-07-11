@@ -36,6 +36,10 @@ type FsService interface {
 	HandleAgentResponse(env protocol.Envelope) bool
 }
 
+type AuditWriter interface {
+	Log(ctx context.Context, event store.AuditEvent) error
+}
+
 type Deps struct {
 	Store            *store.DB
 	Sessions         *auth.SessionManager
@@ -44,7 +48,7 @@ type Deps struct {
 	TwoFactorLimiter *auth.FailureLimiter
 	Now              func() time.Time
 	Presence         *devices.Presence
-	Audit            audit.Writer
+	Audit            AuditWriter
 	Hub              *wshub.Hub
 	Output           terminal.OutputStore
 	StaticFiles      http.FileSystem
@@ -60,7 +64,7 @@ type router struct {
 	twoFactorLimiter *auth.FailureLimiter
 	now              func() time.Time
 	presence         *devices.Presence
-	audit            audit.Writer
+	audit            AuditWriter
 	hub              *wshub.Hub
 	output           terminal.OutputStore
 	static           http.FileSystem
@@ -82,7 +86,7 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Presence == nil {
 		deps.Presence = devices.NewPresence()
 	}
-	if deps.Audit.Store == nil {
+	if deps.Audit == nil {
 		deps.Audit = audit.Writer{Store: deps.Store}
 	}
 	if deps.Hub == nil {
@@ -146,12 +150,12 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if !readJSON(w, req, &body) {
+	if !readLoginJSON(w, req, &body) {
 		return
 	}
 	ip := requestIP(req)
-	limitKey := strings.ToLower(strings.TrimSpace(body.Username)) + "|" + ip
-	if allowed, retryAfter := r.passwordLimiter.Allow(limitKey); !allowed {
+	limitKeys := passwordLoginLimitKeys(body.Username, ip)
+	if allowed, retryAfter := allowLoginAttempt(r.passwordLimiter, limitKeys); !allowed {
 		writeRateLimit(w, retryAfter)
 		return
 	}
@@ -161,7 +165,7 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if errors.Is(err, store.ErrNotFound) || !auth.CheckPassword(user.PasswordHash, body.Password) {
-		if blocked, retryAfter := r.passwordLimiter.RecordFailure(limitKey); blocked {
+		if blocked, retryAfter := recordLoginFailure(r.passwordLimiter, limitKeys); blocked {
 			r.auditLoginRateLimit(req.Context(), user.ID, "password", ip)
 			writeRateLimit(w, retryAfter)
 			return
@@ -169,7 +173,7 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
 		return
 	}
-	r.passwordLimiter.Success(limitKey)
+	clearLoginFailures(r.passwordLimiter, limitKeys)
 
 	setting, err := r.store.GetEnabledTwoFactor(req.Context(), user.ID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -185,6 +189,21 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
+	issuedChallenge, err := r.twoFactor.VerifyLoginChallenge(challenge)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
+	if err := r.store.CreateLoginChallenge(req.Context(), store.LoginChallenge{
+		JTI:             issuedChallenge.JTI,
+		UserID:          issuedChallenge.UserID,
+		ConfigurationID: issuedChallenge.ConfigurationID,
+		ExpiresAt:       issuedChallenge.ExpiresAt,
+		CreatedAt:       issuedChallenge.IssuedAt,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"two_factor_required": true,
 		"challenge_token":     challenge,
@@ -193,21 +212,24 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) completeLogin(w http.ResponseWriter, req *http.Request, user store.User, method string) {
-	if err := r.sessions.Set(w, user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
-		return
-	}
 	metadataJSON, err := json.Marshal(map[string]string{"method": method})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
 		return
 	}
-	_ = r.audit.Log(req.Context(), store.AuditEvent{
+	if err := r.audit.Log(req.Context(), store.AuditEvent{
 		UserID:       user.ID,
 		EventType:    "login",
 		Summary:      "administrator logged in",
 		MetadataJSON: string(metadataJSON),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "audit_unavailable", "failed to record login audit")
+		return
+	}
+	if err := r.sessions.Set(w, user.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
+		return
+	}
 	writeJSON(w, http.StatusOK, userResponse(user))
 }
 
@@ -242,6 +264,51 @@ func writeRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
 	}
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 	writeError(w, http.StatusTooManyRequests, "too_many_attempts", "too many login attempts")
+}
+
+func passwordLoginLimitKeys(username, sourceIP string) []string {
+	account := strings.ToLower(strings.TrimSpace(username))
+	return []string{
+		"account|" + account,
+		"source|" + sourceIP,
+		"account_source|" + account + "|" + sourceIP,
+	}
+}
+
+func allowLoginAttempt(limiter *auth.FailureLimiter, keys []string) (bool, time.Duration) {
+	var longestRetry time.Duration
+	allowed := true
+	for _, key := range keys {
+		keyAllowed, retryAfter := limiter.Allow(key)
+		if !keyAllowed {
+			allowed = false
+			if retryAfter > longestRetry {
+				longestRetry = retryAfter
+			}
+		}
+	}
+	return allowed, longestRetry
+}
+
+func recordLoginFailure(limiter *auth.FailureLimiter, keys []string) (bool, time.Duration) {
+	var longestRetry time.Duration
+	blocked := false
+	for _, key := range keys {
+		keyBlocked, retryAfter := limiter.RecordFailure(key)
+		if keyBlocked {
+			blocked = true
+			if retryAfter > longestRetry {
+				longestRetry = retryAfter
+			}
+		}
+	}
+	return blocked, longestRetry
+}
+
+func clearLoginFailures(limiter *auth.FailureLimiter, keys []string) {
+	for _, key := range keys {
+		limiter.Success(key)
+	}
 }
 
 func (r *router) handleLogout(w http.ResponseWriter, req *http.Request) {
@@ -1241,6 +1308,27 @@ func readJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
 	defer req.Body.Close()
 	if err := json.NewDecoder(req.Body).Decode(dest); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+		return false
+	}
+	return true
+}
+
+func readLoginJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
+	mediaType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
+		return false
+	}
+	defer req.Body.Close()
+	decoder := json.NewDecoder(req.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dest); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body must contain exactly one JSON value")
 		return false
 	}
 	return true

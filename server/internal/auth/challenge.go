@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -11,10 +12,11 @@ import (
 	"time"
 )
 
-const loginChallengeVersion = 1
+const loginChallengeVersion = 2
 
 // LoginChallenge 表示已验证的登录挑战。
 type LoginChallenge struct {
+	JTI             string
 	UserID          string
 	ConfigurationID string
 	IssuedAt        time.Time
@@ -23,6 +25,7 @@ type LoginChallenge struct {
 
 type challengePayload struct {
 	Version         int    `json:"version"`
+	JTI             string `json:"jti"`
 	UserID          string `json:"user_id"`
 	ConfigurationID string `json:"configuration_id"`
 	IssuedAt        int64  `json:"issued_at"`
@@ -113,8 +116,13 @@ func (m *TwoFactorManager) IssueLoginChallenge(userID, configurationID string) (
 	}
 
 	now := m.now().UTC()
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		return "", fmt.Errorf("生成登录挑战 JTI 失败：%w", err)
+	}
 	payload := challengePayload{
 		Version:         loginChallengeVersion,
+		JTI:             base64.RawURLEncoding.EncodeToString(jtiBytes),
 		UserID:          userID,
 		ConfigurationID: configurationID,
 		IssuedAt:        now.Unix(),
@@ -157,8 +165,8 @@ func (m *TwoFactorManager) VerifyLoginChallenge(token string) (LoginChallenge, e
 	if payload.Version != loginChallengeVersion {
 		return LoginChallenge{}, errors.New("登录挑战版本无效")
 	}
-	if payload.UserID == "" || payload.ConfigurationID == "" {
-		return LoginChallenge{}, errors.New("登录挑战缺少用户或配置标识")
+	if payload.JTI == "" || payload.UserID == "" || payload.ConfigurationID == "" {
+		return LoginChallenge{}, errors.New("登录挑战缺少 JTI、用户或配置标识")
 	}
 
 	now := m.now().UTC()
@@ -172,6 +180,7 @@ func (m *TwoFactorManager) VerifyLoginChallenge(token string) (LoginChallenge, e
 	}
 
 	return LoginChallenge{
+		JTI:             payload.JTI,
 		UserID:          payload.UserID,
 		ConfigurationID: payload.ConfigurationID,
 		IssuedAt:        issuedAt,

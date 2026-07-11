@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"hash/fnv"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,22 +52,26 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
-	r.managementAuthMu.Lock()
+	ip := requestIP(req)
+	limitKeys := managementLimitKeys(user.ID, ip)
+	unlockManagement := r.lockManagementCredentials(limitKeys)
 	managementLocked := true
 	defer func() {
 		if managementLocked {
-			r.managementAuthMu.Unlock()
+			unlockManagement()
 		}
 	}()
-	ip, limitKeys := r.managementAttempt(w, req, user.ID)
-	if limitKeys == nil {
+	if !r.managementAttempt(w, limitKeys) {
 		return
+	}
+	if r.beforeManagementCredentialCheck != nil {
+		r.beforeManagementCredentialCheck()
 	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
 		r.writeInvalidManagementCredential(w, req, user.ID, "setup_password", ip, limitKeys, "invalid_credentials", "invalid current password")
 		return
 	}
-	r.managementAuthMu.Unlock()
+	unlockManagement()
 	managementLocked = false
 	if r.twoFactor == nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
@@ -128,11 +134,14 @@ func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request)
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
-	r.managementAuthMu.Lock()
-	defer r.managementAuthMu.Unlock()
-	ip, limitKeys := r.managementAttempt(w, req, user.ID)
-	if limitKeys == nil {
+	ip := requestIP(req)
+	limitKeys := managementLimitKeys(user.ID, ip)
+	defer r.lockManagementCredentials(limitKeys)()
+	if !r.managementAttempt(w, limitKeys) {
 		return
+	}
+	if r.beforeManagementCredentialCheck != nil {
+		r.beforeManagementCredentialCheck()
 	}
 	if r.twoFactor == nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
@@ -197,11 +206,14 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
-	r.managementAuthMu.Lock()
-	defer r.managementAuthMu.Unlock()
-	ip, limitKeys := r.managementAttempt(w, req, user.ID)
-	if limitKeys == nil {
+	ip := requestIP(req)
+	limitKeys := managementLimitKeys(user.ID, ip)
+	defer r.lockManagementCredentials(limitKeys)()
+	if !r.managementAttempt(w, limitKeys) {
 		return
+	}
+	if r.beforeManagementCredentialCheck != nil {
+		r.beforeManagementCredentialCheck()
 	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
 		r.writeInvalidManagementCredential(w, req, user.ID, "recovery_password", ip, limitKeys, "invalid_credentials", "invalid current password")
@@ -285,11 +297,14 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
-	r.managementAuthMu.Lock()
-	defer r.managementAuthMu.Unlock()
-	ip, limitKeys := r.managementAttempt(w, req, user.ID)
-	if limitKeys == nil {
+	ip := requestIP(req)
+	limitKeys := managementLimitKeys(user.ID, ip)
+	defer r.lockManagementCredentials(limitKeys)()
+	if !r.managementAttempt(w, limitKeys) {
 		return
+	}
+	if r.beforeManagementCredentialCheck != nil {
+		r.beforeManagementCredentialCheck()
 	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
 		r.writeInvalidManagementCredential(w, req, user.ID, "disable_password", ip, limitKeys, "invalid_credentials", "invalid current password")
@@ -309,14 +324,12 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (r *router) managementAttempt(w http.ResponseWriter, req *http.Request, userID string) (string, []string) {
-	ip := requestIP(req)
-	keys := managementLimitKeys(userID, ip)
+func (r *router) managementAttempt(w http.ResponseWriter, keys []string) bool {
 	if allowed, retryAfter := allowLoginAttempt(r.managementLimiter, keys); !allowed {
 		writeRateLimit(w, retryAfter)
-		return ip, nil
+		return false
 	}
-	return ip, keys
+	return true
 }
 
 func (r *router) writeInvalidManagementCredential(w http.ResponseWriter, req *http.Request, userID, stage, sourceIP string, limitKeys []string, code, message string) {
@@ -330,6 +343,33 @@ func (r *router) writeInvalidManagementCredential(w http.ResponseWriter, req *ht
 
 func managementLimitKeys(userID, sourceIP string) []string {
 	return []string{"user|" + userID, "source|" + sourceIP, "user_source|" + userID + "|" + sourceIP}
+}
+
+func (r *router) lockManagementCredentials(keys []string) func() {
+	indexes := managementLockIndexes(keys)
+	for _, index := range indexes {
+		r.managementAuthLocks[index].Lock()
+	}
+	return func() {
+		for index := len(indexes) - 1; index >= 0; index-- {
+			r.managementAuthLocks[indexes[index]].Unlock()
+		}
+	}
+}
+
+func managementLockIndexes(keys []string) []int {
+	unique := make(map[int]struct{}, len(keys))
+	for _, key := range keys {
+		hash := fnv.New32a()
+		_, _ = hash.Write([]byte(key))
+		unique[int(hash.Sum32()%256)] = struct{}{}
+	}
+	indexes := make([]int, 0, len(unique))
+	for index := range unique {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	return indexes
 }
 
 // auditCommittedTwoFactorChange 在状态提交后尽力记录审计。

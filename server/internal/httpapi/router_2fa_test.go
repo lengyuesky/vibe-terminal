@@ -352,6 +352,28 @@ func (f *loginTwoFactorFixture) router() *router {
 	return r
 }
 
+func (f *loginTwoFactorFixture) createSessionCookie(userID, username, password string) *http.Cookie {
+	f.t.Helper()
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		f.t.Fatalf("生成附加用户密码哈希失败：%v", err)
+	}
+	if _, err := f.db.CreateUser(context.Background(), store.User{ID: userID, Username: username, PasswordHash: hash}); err != nil {
+		f.t.Fatalf("创建附加用户失败：%v", err)
+	}
+	rr := httptest.NewRecorder()
+	if err := f.router().sessions.Set(rr, userID); err != nil {
+		f.t.Fatalf("创建附加用户会话失败：%v", err)
+	}
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == auth.CookieName {
+			return cookie
+		}
+	}
+	f.t.Fatal("附加用户会话缺少Cookie")
+	return nil
+}
+
 func synchronizeConcurrentSecondFactorNow(f *loginTwoFactorFixture) {
 	f.t.Helper()
 	firstPhase := make(chan struct{})
@@ -1129,6 +1151,79 @@ func TestConcurrentManagementFailuresProduceOneThresholdAudit(t *testing.T) {
 	if auditCount != 1 {
 		t.Fatalf("并发管理限流审计数量 = %d，期望 1", auditCount)
 	}
+}
+
+func TestManagementCredentialLocksAreKeyScoped(t *testing.T) {
+	t.Run("不同用户和IP并行", func(t *testing.T) {
+		fixture := newConcurrentLoginTwoFactorFixture(t, false)
+		firstCookie := fixture.authenticatedCookie()
+		secondCookie := fixture.createSessionCookie("management-user-2", "operator", "secret-2")
+		arrived := make(chan struct{}, 2)
+		release := make(chan struct{})
+		fixture.router().beforeManagementCredentialCheck = func() {
+			arrived <- struct{}{}
+			<-release
+		}
+		start := make(chan struct{})
+		responses := make(chan *httptest.ResponseRecorder, 2)
+		go func() {
+			<-start
+			responses <- fixture.managementRequestFromIP(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`, "application/json", firstCookie, "192.0.2.10", "")
+		}()
+		go func() {
+			<-start
+			responses <- fixture.managementRequestFromIP(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`, "application/json", secondCookie, "192.0.2.20", "")
+		}()
+		close(start)
+		for range 2 {
+			select {
+			case <-arrived:
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("独立用户/IP未并行进入凭据检查")
+			}
+		}
+		close(release)
+		<-responses
+		<-responses
+	})
+
+	t.Run("同IP不同用户串行", func(t *testing.T) {
+		fixture := newConcurrentLoginTwoFactorFixture(t, false)
+		firstCookie := fixture.authenticatedCookie()
+		secondCookie := fixture.createSessionCookie("management-shared-user", "shared", "secret-2")
+		arrived := make(chan struct{}, 2)
+		release := make(chan struct{})
+		fixture.router().beforeManagementCredentialCheck = func() {
+			arrived <- struct{}{}
+			<-release
+		}
+		start := make(chan struct{})
+		responses := make(chan *httptest.ResponseRecorder, 2)
+		for _, cookie := range []*http.Cookie{firstCookie, secondCookie} {
+			cookie := cookie
+			go func() {
+				<-start
+				responses <- fixture.managementRequestFromIP(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`, "application/json", cookie, "192.0.2.30", "")
+			}()
+		}
+		close(start)
+		select {
+		case <-arrived:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("首个共享IP请求未进入凭据检查")
+		}
+		select {
+		case <-arrived:
+			close(release)
+			t.Fatal("共享IP请求不应并行进入凭据检查")
+		case <-time.After(100 * time.Millisecond):
+		}
+		close(release)
+		<-responses
+		<-responses
+	})
 }
 
 func TestRequireUserDistinguishesMissingUserFromStoreFailure(t *testing.T) {

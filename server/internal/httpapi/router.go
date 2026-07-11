@@ -59,23 +59,24 @@ type Deps struct {
 }
 
 type router struct {
-	store                      *store.DB
-	sessions                   *auth.SessionManager
-	twoFactor                  *auth.TwoFactorManager
-	passwordLimiter            *auth.FailureLimiter
-	twoFactorLimiter           *auth.FailureLimiter
-	managementLimiter          *auth.FailureLimiter
-	managementAuthMu           sync.Mutex
-	beforePendingTwoFactorSave func()
-	now                        func() time.Time
-	presence                   *devices.Presence
-	audit                      AuditWriter
-	hub                        *wshub.Hub
-	output                     terminal.OutputStore
-	static                     http.FileSystem
-	files                      FsService
-	fsMaxUpload                int64
-	mux                        *http.ServeMux
+	store                           *store.DB
+	sessions                        *auth.SessionManager
+	twoFactor                       *auth.TwoFactorManager
+	passwordLimiter                 *auth.FailureLimiter
+	twoFactorLimiter                *auth.FailureLimiter
+	managementLimiter               *auth.FailureLimiter
+	managementAuthLocks             [256]sync.Mutex
+	beforeManagementCredentialCheck func()
+	beforePendingTwoFactorSave      func()
+	now                             func() time.Time
+	presence                        *devices.Presence
+	audit                           AuditWriter
+	hub                             *wshub.Hub
+	output                          terminal.OutputStore
+	static                          http.FileSystem
+	files                           FsService
+	fsMaxUpload                     int64
+	mux                             *http.ServeMux
 }
 
 func NewRouter(deps Deps) http.Handler {

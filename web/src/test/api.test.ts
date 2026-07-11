@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { APIError, login, me, verifyTwoFactor } from '../api';
+import {
+  APIError,
+  disableTwoFactor,
+  enableTwoFactor,
+  getTwoFactorStatus,
+  login,
+  me,
+  regenerateRecoveryCodes,
+  startTwoFactorSetup,
+  verifyTwoFactor,
+} from '../api';
 import { jsonRequestHeaders } from '../api-internals';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -194,5 +204,84 @@ describe('统一 API 错误', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not-json', { status: 200 })));
     await expect(me()).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+});
+
+describe('二因素管理 API', () => {
+  it('按后端契约发送五个请求并解析有效响应', async () => {
+    const recoveryCodes = Array.from({ length: 10 }, (_, index) => `CODE-${index + 1}`);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { enabled: true, recovery_codes_remaining: 7 }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          manual_key: 'MANUALKEY',
+          otpauth_uri: 'otpauth://totp/Vibe%20Terminal:admin?secret=MANUALKEY',
+          expires_at: '2026-07-11T15:00:00Z',
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { recovery_codes: recoveryCodes }))
+      .mockResolvedValueOnce(jsonResponse(200, { recovery_codes: recoveryCodes }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getTwoFactorStatus()).resolves.toEqual({ enabled: true, recoveryCodesRemaining: 7 });
+    await expect(startTwoFactorSetup('secret')).resolves.toEqual({
+      manualKey: 'MANUALKEY',
+      otpauthURI: 'otpauth://totp/Vibe%20Terminal:admin?secret=MANUALKEY',
+      expiresAt: '2026-07-11T15:00:00Z',
+    });
+    await expect(enableTwoFactor('123456')).resolves.toEqual(recoveryCodes);
+    await expect(regenerateRecoveryCodes('secret', '654321')).resolves.toEqual(recoveryCodes);
+    await expect(disableTwoFactor('secret')).resolves.toBeUndefined();
+
+    const expectedRequests = [
+      ['/api/security/2fa', { method: 'GET' }],
+      ['/api/security/2fa/setup', { method: 'POST', body: JSON.stringify({ password: 'secret' }) }],
+      ['/api/security/2fa/enable', { method: 'POST', body: JSON.stringify({ code: '123456' }) }],
+      [
+        '/api/security/2fa/recovery-codes',
+        { method: 'POST', body: JSON.stringify({ password: 'secret', code: '654321' }) },
+      ],
+      ['/api/security/2fa/disable', { method: 'POST', body: JSON.stringify({ password: 'secret' }) }],
+    ] as const;
+    expect(fetchMock).toHaveBeenCalledTimes(expectedRequests.length);
+    expectedRequests.forEach(([path, expected], index) => {
+      const [actualPath, init] = fetchMock.mock.calls[index] as [string, RequestInit];
+      expect(actualPath).toBe(path);
+      expect(init).toMatchObject({ ...expected, credentials: 'include' });
+      expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
+    });
+  });
+
+  it.each([
+    ['status 字段错误', getTwoFactorStatus, { enabled: 'yes', recovery_codes_remaining: 0 }],
+    ['status 数量越界', getTwoFactorStatus, { enabled: true, recovery_codes_remaining: 11 }],
+    [
+      'setup 字段错误',
+      () => startTwoFactorSetup('secret'),
+      { manual_key: '', otpauth_uri: 'otpauth://totp/example', expires_at: 'not-a-date' },
+    ],
+    ['enable 不足十码', () => enableTwoFactor('123456'), { recovery_codes: Array(9).fill('CODE') }],
+    [
+      '轮换包含空码',
+      () => regenerateRecoveryCodes('secret', '123456'),
+      { recovery_codes: [...Array(9).fill('CODE'), ''] },
+    ],
+    ['disable 未确认', () => disableTwoFactor('secret'), { ok: false }],
+  ])('拒绝异常成功响应：%s', async (_name, call, body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, body)));
+    await expect(call()).rejects.toMatchObject({ name: 'APIError', code: 'invalid_response' });
+  });
+
+  it('拒绝管理接口的意外成功状态，包括 disable 的 204', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(disableTwoFactor('secret')).rejects.toMatchObject({ status: 204, code: 'invalid_response' });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(201, { enabled: false, recovery_codes_remaining: 0 }))
+    );
+    await expect(getTwoFactorStatus()).rejects.toMatchObject({ status: 201, code: 'invalid_response' });
   });
 });

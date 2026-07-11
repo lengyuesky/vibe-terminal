@@ -37,6 +37,9 @@ export type LoginResult =
   | { status: 'authenticated'; user: User }
   | { status: 'two_factor_required'; challengeToken: string; expiresIn: number };
 
+export type TwoFactorStatus = { enabled: boolean; recoveryCodesRemaining: number };
+export type TwoFactorSetup = { manualKey: string; otpauthURI: string; expiresAt: string };
+
 export class APIError extends Error {
   status: number;
   code: string;
@@ -167,6 +170,105 @@ export async function verifyTwoFactor(challengeToken: string, code: string): Pro
     throw new APIError(response.status, 'invalid_response', 'server returned an invalid verification response');
   }
   return parseUser(await responseJSON(response), response.status);
+}
+
+function requireManagementStatus(response: Response): void {
+  if (response.status !== 200) {
+    throw new APIError(response.status, 'invalid_response', 'server returned an unexpected success status');
+  }
+}
+
+function responseObject(value: unknown, status: number): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new APIError(status, 'invalid_response', 'server returned an invalid two-factor response');
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseRecoveryCodes(value: unknown, status: number): string[] {
+  const body = responseObject(value, status);
+  if (
+    !Array.isArray(body.recovery_codes) ||
+    body.recovery_codes.length !== 10 ||
+    body.recovery_codes.some((code) => typeof code !== 'string' || !code.trim())
+  ) {
+    throw new APIError(status, 'invalid_response', 'server returned invalid recovery codes');
+  }
+  return body.recovery_codes.map((code) => code.trim());
+}
+
+export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
+  const response = await fetchResponse('/api/security/2fa', { method: 'GET' });
+  requireManagementStatus(response);
+  const body = responseObject(await responseJSON(response), response.status);
+  if (
+    typeof body.enabled !== 'boolean' ||
+    !Number.isSafeInteger(body.recovery_codes_remaining) ||
+    (body.recovery_codes_remaining as number) < 0 ||
+    (body.recovery_codes_remaining as number) > 10 ||
+    (!body.enabled && body.recovery_codes_remaining !== 0)
+  ) {
+    throw new APIError(response.status, 'invalid_response', 'server returned an invalid two-factor status');
+  }
+  return {
+    enabled: body.enabled,
+    recoveryCodesRemaining: body.recovery_codes_remaining as number,
+  };
+}
+
+export async function startTwoFactorSetup(password: string): Promise<TwoFactorSetup> {
+  const response = await fetchResponse('/api/security/2fa/setup', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  requireManagementStatus(response);
+  const body = responseObject(await responseJSON(response), response.status);
+  if (
+    typeof body.manual_key !== 'string' ||
+    !body.manual_key.trim() ||
+    typeof body.otpauth_uri !== 'string' ||
+    !body.otpauth_uri.startsWith('otpauth://') ||
+    typeof body.expires_at !== 'string' ||
+    !body.expires_at ||
+    !Number.isFinite(Date.parse(body.expires_at))
+  ) {
+    throw new APIError(response.status, 'invalid_response', 'server returned an invalid two-factor setup');
+  }
+  return {
+    manualKey: body.manual_key.trim(),
+    otpauthURI: body.otpauth_uri,
+    expiresAt: body.expires_at,
+  };
+}
+
+export async function enableTwoFactor(code: string): Promise<string[]> {
+  const response = await fetchResponse('/api/security/2fa/enable', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+  requireManagementStatus(response);
+  return parseRecoveryCodes(await responseJSON(response), response.status);
+}
+
+export async function regenerateRecoveryCodes(password: string, code: string): Promise<string[]> {
+  const response = await fetchResponse('/api/security/2fa/recovery-codes', {
+    method: 'POST',
+    body: JSON.stringify({ password, code }),
+  });
+  requireManagementStatus(response);
+  return parseRecoveryCodes(await responseJSON(response), response.status);
+}
+
+export async function disableTwoFactor(password: string): Promise<void> {
+  const response = await fetchResponse('/api/security/2fa/disable', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  requireManagementStatus(response);
+  const body = responseObject(await responseJSON(response), response.status);
+  if (body.ok !== true) {
+    throw new APIError(response.status, 'invalid_response', 'server did not confirm two-factor disable');
+  }
 }
 
 export function me(): Promise<User> {

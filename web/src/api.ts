@@ -1,3 +1,5 @@
+import { jsonRequestHeaders } from './api-internals';
+
 export type User = { id: string; username: string };
 export type Device = { id: string; name: string; platform: string; online: boolean };
 export type Session = {
@@ -75,14 +77,12 @@ async function toAPIError(response: Response): Promise<APIError> {
   return new APIError(response.status, code, message, retryAfterSeconds(response));
 }
 
-export async function fetchResponse(path: string, init?: RequestInit): Promise<Response> {
+async function fetchResponse(path: string, init?: RequestInit): Promise<Response> {
   let response: Response;
   try {
-    const headers = new Headers(init?.headers);
-    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     response = await fetch(path, {
       ...init,
-      headers,
+      headers: jsonRequestHeaders(init?.headers),
       credentials: 'include',
     });
   } catch (error) {
@@ -146,7 +146,7 @@ export async function login(username: string, password: string): Promise<LoginRe
     body.challenge_token &&
     'expires_in' in body &&
     typeof body.expires_in === 'number' &&
-    Number.isFinite(body.expires_in) &&
+    Number.isSafeInteger(body.expires_in) &&
     body.expires_in > 0
   ) {
     return {

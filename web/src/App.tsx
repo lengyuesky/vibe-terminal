@@ -1,5 +1,5 @@
 import { KeyRound, Monitor, Terminal } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
@@ -28,9 +28,24 @@ export function App() {
   const [createdAgentToken, setCreatedAgentToken] = useState<CreatedAgentToken | null>(null);
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const authGenerationRef = useRef(0);
 
   useEffect(() => {
-    api.me().then(setUser).catch(() => setUser(null));
+    mountedRef.current = true;
+    const generation = ++authGenerationRef.current;
+    api.me().then(
+      (bootstrapUser) => {
+        if (mountedRef.current && generation === authGenerationRef.current) setUser(bootstrapUser);
+      },
+      () => {
+        if (mountedRef.current && generation === authGenerationRef.current) setUser(null);
+      }
+    );
+    return () => {
+      mountedRef.current = false;
+      authGenerationRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -67,13 +82,18 @@ export function App() {
   }, [user]);
 
   async function handleLogin(username: string, password: string): Promise<LoginResult> {
+    const generation = ++authGenerationRef.current;
     const result = await api.login(username, password);
-    if (result.status === 'authenticated') setUser(result.user);
+    if (mountedRef.current && generation === authGenerationRef.current && result.status === 'authenticated') {
+      setUser(result.user);
+    }
     return result;
   }
 
   async function handleVerifyTwoFactor(challengeToken: string, code: string) {
-    setUser(await api.verifyTwoFactor(challengeToken, code));
+    const generation = ++authGenerationRef.current;
+    const verifiedUser = await api.verifyTwoFactor(challengeToken, code);
+    if (mountedRef.current && generation === authGenerationRef.current) setUser(verifiedUser);
   }
 
   async function handleCreateSession(deviceId: string) {

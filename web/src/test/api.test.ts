@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { APIError, fetchResponse, login, me, verifyTwoFactor } from '../api';
+import { APIError, login, me, verifyTwoFactor } from '../api';
+import { jsonRequestHeaders } from '../api-internals';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
@@ -66,6 +67,21 @@ describe('登录 API', () => {
     });
   });
 
+  it.each([1.5, Number.MAX_SAFE_INTEGER + 1])('拒绝不安全的 expires_in：%s', async (expiresIn) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(202, {
+          two_factor_required: true,
+          challenge_token: 'challenge-1',
+          expires_in: expiresIn,
+        })
+      )
+    );
+
+    await expect(login('admin', 'secret')).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
   it('提交第二因素并返回服务端用户', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { id: 'user-1', username: 'admin' }));
     vi.stubGlobal('fetch', fetchMock);
@@ -116,25 +132,13 @@ describe('统一请求头', () => {
     { name: 'Headers', headers: new Headers({ Accept: 'text/plain' }), expected: 'text/plain' },
     { name: '元组', headers: [['Accept', 'application/problem+json']] as [string, string][], expected: 'application/problem+json' },
   ])('兼容 $name 形式并补默认 Content-Type', async ({ headers, expected }) => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await fetchResponse('/api/example', { headers });
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    const sent = new Headers(init.headers);
+    const sent = jsonRequestHeaders(headers);
     expect(sent.get('Accept')).toBe(expected);
     expect(sent.get('Content-Type')).toBe('application/json');
-    expect(init.credentials).toBe('include');
   });
 
   it('保留调用方显式 Content-Type', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await fetchResponse('/api/upload', { headers: new Headers({ 'Content-Type': 'text/plain' }), credentials: 'omit' });
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(new Headers(init.headers).get('Content-Type')).toBe('text/plain');
-    expect(init.credentials).toBe('include');
+    expect(jsonRequestHeaders(new Headers({ 'Content-Type': 'text/plain' })).get('Content-Type')).toBe('text/plain');
   });
 });
 

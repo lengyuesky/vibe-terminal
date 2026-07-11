@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView } from '../App';
@@ -30,6 +30,16 @@ vi.mock('../api', async (importOriginal) => {
 });
 
 const mockedApi = vi.mocked(api);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -546,5 +556,69 @@ describe('AppView', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid two factor code');
     expect(screen.getByRole('heading', { name: 'Two-factor authentication' })).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+  });
+
+  it.each(['resolve', 'reject'] as const)('密码登录成功后忽略延迟 me %s', async (outcome) => {
+    const bootstrap = deferred<api.User>();
+    mockedApi.me.mockReturnValue(bootstrap.promise);
+    mockedApi.login.mockResolvedValue({
+      status: 'authenticated',
+      user: { id: 'login-user', username: 'admin' },
+    });
+    mockedApi.listDevices.mockResolvedValue([]);
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+    expect(await screen.findByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+
+    await act(async () => {
+      if (outcome === 'resolve') bootstrap.resolve({ id: 'stale-user', username: 'stale' });
+      else bootstrap.reject(new Error('stale unauthorized'));
+      await bootstrap.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument());
+    expect(mockedApi.listDevices).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['resolve', 'reject'] as const)('二因素成功后忽略延迟 me %s', async (outcome) => {
+    const bootstrap = deferred<api.User>();
+    mockedApi.me.mockReturnValue(bootstrap.promise);
+    mockedApi.login.mockResolvedValue({
+      status: 'two_factor_required',
+      challengeToken: 'challenge-1',
+      expiresIn: 300,
+    });
+    mockedApi.verifyTwoFactor.mockResolvedValue({ id: 'verified-user', username: 'admin' });
+    mockedApi.listDevices.mockResolvedValue([]);
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Verify' }));
+    expect(await screen.findByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+
+    await act(async () => {
+      if (outcome === 'resolve') bootstrap.resolve({ id: 'stale-user', username: 'stale' });
+      else bootstrap.reject(new Error('stale unauthorized'));
+      await bootstrap.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument());
+    expect(mockedApi.listDevices).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['resolve', 'reject'] as const)('卸载后忽略 me %s', async (outcome) => {
+    const bootstrap = deferred<api.User>();
+    mockedApi.me.mockReturnValue(bootstrap.promise);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { unmount } = render(<App />);
+    unmount();
+
+    await act(async () => {
+      if (outcome === 'resolve') bootstrap.resolve({ id: 'stale-user', username: 'stale' });
+      else bootstrap.reject(new Error('stale unauthorized'));
+      await bootstrap.promise.catch(() => undefined);
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

@@ -104,6 +104,31 @@ function AutoLoadTokenHarness({ user }: { user: api.User }) {
 }
 
 describe('useAgentTokenState', () => {
+  it.each(['create', 'revoke', 'delete'] as const)(
+    '用户B发起pending %s时不会重新展开用户A的Token状态',
+    async (operation) => {
+      mockedApi.createAgentToken.mockResolvedValueOnce({
+        id: 'token-a', name: '用户A-Token', token: '用户A-明文', created_at: '', expires_at: '',
+      });
+      const { rerender } = render(<TokenStateHarness user={{ id: 'user-a', username: 'a' }} />);
+      await userEvent.click(screen.getByRole('button', { name: 'create' }));
+      expect(await screen.findByText('用户A-明文')).toBeInTheDocument();
+
+      const request = deferred<never>();
+      if (operation === 'create') mockedApi.createAgentToken.mockReturnValue(request.promise);
+      if (operation === 'revoke') mockedApi.revokeAgentToken.mockReturnValue(request.promise);
+      if (operation === 'delete') mockedApi.deleteAgentToken.mockReturnValue(request.promise);
+      rerender(<TokenStateHarness user={{ id: 'user-b', username: 'b' }} />);
+      await userEvent.click(screen.getByRole('button', { name: operation }));
+
+      expect(screen.queryByText('用户A-Token')).not.toBeInTheDocument();
+      expect(screen.queryByText('用户A-明文')).not.toBeInTheDocument();
+      await act(async () => request.reject(new Error('用户B请求失败')));
+      expect(screen.queryByText('用户A-Token')).not.toBeInTheDocument();
+      expect(screen.queryByText('用户A-明文')).not.toBeInTheDocument();
+    }
+  );
+
   it('首次列表完成后load保持稳定且不产生刷新循环', async () => {
     mockedApi.listAgentTokens.mockResolvedValue([{ id: 'token-1', name: 'stable', created_at: '', expires_at: '' }]);
     render(<AutoLoadTokenHarness user={{ id: 'user-a', username: 'a' }} />);

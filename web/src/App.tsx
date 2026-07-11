@@ -20,6 +20,12 @@ type AgentTokenState = {
   error: string | null;
 };
 
+function scopeAgentTokenState(value: AgentTokenState, userId: string | null): AgentTokenState {
+  return value.userId === userId
+    ? value
+    : { userId, tokens: [], createdToken: null, loading: false, error: null };
+}
+
 export function useAgentTokenState(user: User | null) {
   const userId = user?.id ?? null;
   const generationRef = useRef(0);
@@ -51,44 +57,53 @@ export function useAgentTokenState(user: User | null) {
     try {
       const tokens = await api.listAgentTokens();
       if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
-        setState((value) => ({ ...value, userId: request.userId, tokens }));
+        setState((value) => ({ ...scopeAgentTokenState(value, request.userId), tokens }));
       }
     } catch {
       if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
-        setState((value) => ({ ...value, userId: request.userId, error: 'Failed to load agent tokens.' }));
+        setState((value) => ({ ...scopeAgentTokenState(value, request.userId), error: 'Failed to load agent tokens.' }));
       }
     } finally {
       if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
-        setState((value) => ({ ...value, userId: request.userId, loading: false }));
+        setState((value) => ({ ...scopeAgentTokenState(value, request.userId), loading: false }));
       }
     }
   }, [userId]);
 
-  async function mutate<T>(action: () => Promise<T>, failure: string, apply: (value: T) => void) {
+  async function mutate<T>(action: () => Promise<T>, failure: string, apply: (value: T, userId: string | null) => void) {
     const request = begin();
     if (!request.userId) return;
-    setState((value) => ({ ...value, userId: request.userId, loading: true, error: null }));
+    setState((value) => ({ ...scopeAgentTokenState(value, request.userId), loading: true, error: null }));
     try {
       const result = await action();
-      if (valid(request)) apply(result);
+      if (valid(request)) apply(result, request.userId);
     } catch (error) {
-      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, error: failure }));
+      if (valid(request)) setState((value) => ({ ...scopeAgentTokenState(value, request.userId), error: failure }));
       throw error;
     } finally {
-      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, loading: false }));
+      if (valid(request)) setState((value) => ({ ...scopeAgentTokenState(value, request.userId), loading: false }));
     }
   }
   const create = (name: string, ttlHours: number) => mutate(
-    () => api.createAgentToken(name, ttlHours), 'Failed to create agent token.', (created) =>
-      setState((value) => ({ ...value, userId, createdToken: created, tokens: [created, ...value.tokens.filter((token) => token.id !== created.id)] }))
+    () => api.createAgentToken(name, ttlHours), 'Failed to create agent token.', (created, scopedUserId) =>
+      setState((value) => {
+        const scoped = scopeAgentTokenState(value, scopedUserId);
+        return { ...scoped, createdToken: created, tokens: [created, ...scoped.tokens.filter((token) => token.id !== created.id)] };
+      })
   );
   const revoke = (id: string) => mutate(
-    () => api.revokeAgentToken(id), 'Failed to revoke agent token.', (revoked) =>
-      setState((value) => ({ ...value, userId, tokens: value.tokens.map((token) => token.id === id ? revoked : token) }))
+    () => api.revokeAgentToken(id), 'Failed to revoke agent token.', (revoked, scopedUserId) =>
+      setState((value) => {
+        const scoped = scopeAgentTokenState(value, scopedUserId);
+        return { ...scoped, tokens: scoped.tokens.map((token) => token.id === id ? revoked : token) };
+      })
   );
   const remove = (id: string) => mutate(
-    () => api.deleteAgentToken(id), 'Failed to delete agent token.', () =>
-      setState((value) => ({ ...value, userId, tokens: value.tokens.filter((token) => token.id !== id), createdToken: value.createdToken?.id === id ? null : value.createdToken }))
+    () => api.deleteAgentToken(id), 'Failed to delete agent token.', (_, scopedUserId) =>
+      setState((value) => {
+        const scoped = scopeAgentTokenState(value, scopedUserId);
+        return { ...scoped, tokens: scoped.tokens.filter((token) => token.id !== id), createdToken: scoped.createdToken?.id === id ? null : scoped.createdToken };
+      })
   );
   return { tokens: current.tokens, createdToken: current.createdToken, loading: current.loading, error: current.error, load, create, revoke, remove };
 }

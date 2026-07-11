@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -284,6 +285,10 @@ func (f *loginTwoFactorFixture) authenticatedCookie() *http.Cookie {
 }
 
 func (f *loginTwoFactorFixture) managementRequest(method, path, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	return f.managementRequestFromIP(method, path, body, contentType, cookie, testLoginIP, "")
+}
+
+func (f *loginTwoFactorFixture) managementRequestFromIP(method, path, body, contentType string, cookie *http.Cookie, remoteIP, forwardedIP string) *httptest.ResponseRecorder {
 	f.t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if contentType != "" {
@@ -292,9 +297,24 @@ func (f *loginTwoFactorFixture) managementRequest(method, path, body, contentTyp
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
+	if forwardedIP != "" {
+		req.Header.Set("X-Forwarded-For", forwardedIP)
+	}
+	req.RemoteAddr = remoteIP + ":43210"
 	rr := httptest.NewRecorder()
 	f.handler.ServeHTTP(rr, req)
 	return rr
+}
+
+func (f *loginTwoFactorFixture) useManagementLimiter(limiter *auth.FailureLimiter) {
+	f.t.Helper()
+	f.handler = NewRouter(Deps{
+		Store:             f.db,
+		Sessions:          auth.NewSessionManager(testLoginRootKey, time.Hour),
+		TwoFactor:         f.manager,
+		ManagementLimiter: limiter,
+		Now:               func() time.Time { return f.now },
+	})
 }
 
 func (f *loginTwoFactorFixture) useAuditWriter(writer AuditWriter) {
@@ -490,6 +510,21 @@ func TestTwoFactorSetupRevalidatesPasswordAndSavesEncryptedPendingSecret(t *test
 	}
 	if strings.Contains(rr.Body.String(), pending.SecretCiphertext) {
 		t.Fatal("setup 响应泄露了密钥密文")
+	}
+}
+
+func TestTwoFactorSetupUsesVibeTerminalIssuer(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	setup := fixture.beginManagementSetup(fixture.authenticatedCookie())
+	parsed, err := url.Parse(setup.OtpauthURI)
+	if err != nil {
+		t.Fatalf("解析otpauth URI失败：%v", err)
+	}
+	if parsed.Query().Get("issuer") != "vibe-terminal" {
+		t.Fatalf("issuer = %q，期望 vibe-terminal", parsed.Query().Get("issuer"))
+	}
+	if label, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/")); err != nil || label != "vibe-terminal:"+testLoginUsername {
+		t.Fatalf("TOTP标签 = %q, %v", label, err)
 	}
 }
 
@@ -928,6 +963,144 @@ func TestTwoFactorManagementRoutesAllRequireAuthentication(t *testing.T) {
 	}
 }
 
+func TestManagementReauthenticationFailuresAreRateLimitedByStage(t *testing.T) {
+	testCases := []struct {
+		name    string
+		enabled bool
+		prepare func(*loginTwoFactorFixture, *http.Cookie)
+		path    string
+		body    string
+		stage   string
+	}{
+		{name: "setup密码", path: "/api/security/2fa/setup", body: `{"password":"wrong"}`, stage: "setup_password"},
+		{name: "disable密码", enabled: true, path: "/api/security/2fa/disable", body: `{"password":"wrong"}`, stage: "disable_password"},
+		{name: "regen密码", enabled: true, path: "/api/security/2fa/recovery-codes", body: `{"password":"wrong","code":"000000"}`, stage: "recovery_password"},
+		{name: "regen TOTP", enabled: true, path: "/api/security/2fa/recovery-codes", body: `{"password":"secret","code":"abcdef"}`, stage: "recovery_totp"},
+		{name: "enable TOTP", prepare: func(f *loginTwoFactorFixture, cookie *http.Cookie) { f.beginManagementSetup(cookie) }, path: "/api/security/2fa/enable", body: `{"code":"abcdef"}`, stage: "enable_totp"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newLoginTwoFactorFixture(t, testCase.enabled)
+			cookie := fixture.authenticatedCookie()
+			if testCase.prepare != nil {
+				testCase.prepare(fixture, cookie)
+			}
+			fixture.useManagementLimiter(auth.NewFailureLimiter(1, 10*time.Minute, 15*time.Minute, 100, func() time.Time { return fixture.now }))
+			rr := fixture.managementRequest(http.MethodPost, testCase.path, testCase.body, "application/json", cookie)
+			if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" || responseErrorCode(t, rr) != "too_many_attempts" {
+				t.Fatalf("管理限流响应 = %d %s", rr.Code, rr.Body.String())
+			}
+			var metadataJSON string
+			if err := fixture.db.SQL.QueryRowContext(context.Background(),
+				`select metadata_json from audit_events where event_type = 'management_reauthentication_rate_limited'`).Scan(&metadataJSON); err != nil {
+				t.Fatalf("查询管理限流审计失败：%v", err)
+			}
+			var metadata map[string]string
+			if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil || metadata["stage"] != testCase.stage {
+				t.Fatalf("管理限流审计 = %s, %v", metadataJSON, err)
+			}
+			_ = fixture.managementRequest(http.MethodPost, testCase.path, testCase.body, "application/json", cookie)
+			var auditCount int
+			if err := fixture.db.SQL.QueryRowContext(context.Background(),
+				`select count(*) from audit_events where event_type = 'management_reauthentication_rate_limited'`).Scan(&auditCount); err != nil || auditCount != 1 {
+				t.Fatalf("重复阻断后的管理限流审计数量 = %d, %v", auditCount, err)
+			}
+		})
+	}
+}
+
+func TestManagementReauthenticationSuccessClearsFailures(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.useManagementLimiter(auth.NewFailureLimiter(2, 10*time.Minute, 15*time.Minute, 100, func() time.Time { return fixture.now }))
+	wrong := func() *httptest.ResponseRecorder {
+		return fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`, "application/json", cookie)
+	}
+	if rr := wrong(); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("首次错误密码 = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup", `{"password":"secret"}`, "application/json", cookie); rr.Code != http.StatusOK {
+		t.Fatalf("成功setup = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := wrong(); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("成功后首次错误密码 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestManagementLimiterAggregatesUserAndDirectIP(t *testing.T) {
+	now := time.Unix(100, 0)
+	byUser := auth.NewFailureLimiter(2, time.Minute, time.Minute, 100, func() time.Time { return now })
+	if blocked, _ := recordLoginFailure(byUser, managementLimitKeys("user-1", "192.0.2.1")); blocked {
+		t.Fatal("用户首次失败不应限流")
+	}
+	if blocked, _ := recordLoginFailure(byUser, managementLimitKeys("user-1", "192.0.2.2")); !blocked {
+		t.Fatal("轮换IP的同一用户应被用户维度限流")
+	}
+	byIP := auth.NewFailureLimiter(2, time.Minute, time.Minute, 100, func() time.Time { return now })
+	if blocked, _ := recordLoginFailure(byIP, managementLimitKeys("user-1", "192.0.2.9")); blocked {
+		t.Fatal("同IP首个用户失败不应限流")
+	}
+	if blocked, _ := recordLoginFailure(byIP, managementLimitKeys("user-2", "192.0.2.9")); !blocked {
+		t.Fatal("同IP多个用户应被来源维度限流")
+	}
+}
+
+func TestManagementLimiterIgnoresForwardedHeaders(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.useManagementLimiter(auth.NewFailureLimiter(2, 10*time.Minute, 15*time.Minute, 100, func() time.Time { return fixture.now }))
+	for attempt, forwardedIP := range []string{"198.51.100.1", "198.51.100.2"} {
+		rr := fixture.managementRequestFromIP(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`,
+			"application/json", cookie, "192.0.2.50", forwardedIP)
+		if attempt == 0 && rr.Code != http.StatusUnauthorized {
+			t.Fatalf("首次错误密码 = %d %s", rr.Code, rr.Body.String())
+		}
+		if attempt == 1 && rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("伪造转发头后第二次错误密码 = %d %s", rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestManagementLimiterDoesNotCountStoreOrCryptoFailures(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		prepare func(*loginTwoFactorFixture)
+		path    string
+		body    string
+	}{
+		{
+			name: "store", path: "/api/security/2fa/setup", body: `{"password":"secret"}`,
+			prepare: func(f *loginTwoFactorFixture) { _ = f.db.Close() },
+		},
+		{
+			name: "crypto", path: "/api/security/2fa/recovery-codes", body: `{"password":"secret","code":"000000"}`,
+			prepare: func(f *loginTwoFactorFixture) {
+				if _, err := f.db.SQL.ExecContext(context.Background(),
+					`update user_two_factor set secret_ciphertext = 'invalid' where user_id = ?`, testLoginUserID); err != nil {
+					t.Fatalf("破坏测试密文失败：%v", err)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newLoginTwoFactorFixture(t, testCase.name == "crypto")
+			cookie := fixture.authenticatedCookie()
+			limiter := auth.NewFailureLimiter(1, 10*time.Minute, 15*time.Minute, 100, func() time.Time { return fixture.now })
+			fixture.useManagementLimiter(limiter)
+			testCase.prepare(fixture)
+			rr := fixture.managementRequest(http.MethodPost, testCase.path, testCase.body, "application/json", cookie)
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("故障响应 = %d %s", rr.Code, rr.Body.String())
+			}
+			for _, key := range managementLimitKeys(testLoginUserID, testLoginIP) {
+				if allowed, _ := limiter.Allow(key); !allowed {
+					t.Fatalf("%s故障不应计入管理限流：%s", testCase.name, key)
+				}
+			}
+		})
+	}
+}
+
 func TestRequireUserDistinguishesMissingUserFromStoreFailure(t *testing.T) {
 	t.Run("会话用户不存在返回未认证", func(t *testing.T) {
 		fixture := newLoginTwoFactorFixture(t, false)
@@ -1321,6 +1494,21 @@ func TestTamperedLoginChallengeRequiresLoginRestart(t *testing.T) {
 	rr := fixture.secondFactor(tampered, fixture.currentTOTP(), "application/json")
 	if rr.Code != http.StatusUnauthorized || responseErrorCode(t, rr) != "login_restart_required" {
 		t.Fatalf("篡改挑战响应 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestNewLoginChallengeInvalidatesPreviousToken(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	oldChallenge := fixture.beginTwoFactorLogin().ChallengeToken
+	newChallenge := fixture.beginTwoFactorLogin().ChallengeToken
+
+	oldResponse := fixture.secondFactor(oldChallenge, fixture.currentTOTP(), "application/json")
+	if oldResponse.Code != http.StatusUnauthorized || responseErrorCode(t, oldResponse) != "login_restart_required" {
+		t.Fatalf("旧challenge响应 = %d %s", oldResponse.Code, oldResponse.Body.String())
+	}
+	newResponse := fixture.secondFactor(newChallenge, fixture.currentTOTP(), "application/json")
+	if newResponse.Code != http.StatusOK {
+		t.Fatalf("新challenge响应 = %d %s", newResponse.Code, newResponse.Body.String())
 	}
 }
 
@@ -2003,6 +2191,32 @@ func TestRecoveryCodeCompletesLogin(t *testing.T) {
 	}
 	if metadataJSON != `{"method":"recovery_code"}` {
 		t.Fatalf("恢复码登录审计元数据 = %s", metadataJSON)
+	}
+}
+
+func TestRecoveryCodeLoginAuditFailureRollsBackChallengeAndCode(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, true)
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+	if _, err := fixture.db.SQL.ExecContext(context.Background(), `
+		create trigger fail_two_factor_login_audit
+		before insert on audit_events
+		when new.event_type = 'login'
+		begin select raise(fail, 'login audit failed'); end`); err != nil {
+		t.Fatalf("创建登录审计失败触发器失败：%v", err)
+	}
+
+	failed := fixture.secondFactor(challenge, fixture.recoveryCode, "application/json")
+	if failed.Code != http.StatusInternalServerError {
+		t.Fatalf("审计失败状态码 = %d，期望 500；响应=%s", failed.Code, failed.Body.String())
+	}
+	assertNoSessionCookie(t, failed)
+	if _, err := fixture.db.SQL.ExecContext(context.Background(), `drop trigger fail_two_factor_login_audit`); err != nil {
+		t.Fatalf("删除登录审计失败触发器失败：%v", err)
+	}
+
+	retry := fixture.secondFactor(challenge, fixture.recoveryCode, "application/json")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("审计恢复后重试状态码 = %d，期望 200；响应=%s", retry.Code, retry.Body.String())
 	}
 }
 

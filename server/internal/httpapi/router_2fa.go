@@ -50,8 +50,12 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	ip, limitKeys := r.managementAttempt(w, req, user.ID)
+	if limitKeys == nil {
+		return
+	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		r.writeInvalidManagementCredential(w, req, user.ID, "setup_password", ip, limitKeys, "invalid_credentials", "invalid current password")
 		return
 	}
 	if r.twoFactor == nil {
@@ -70,7 +74,7 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	manualKey, otpauthURI, ciphertext, err := r.twoFactor.GenerateSetup("Vibe Terminal", user.Username)
+	manualKey, otpauthURI, ciphertext, err := r.twoFactor.GenerateSetup("vibe-terminal", user.Username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
@@ -96,6 +100,7 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
+	clearLoginFailures(r.managementLimiter, limitKeys)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"manual_key":  manualKey,
 		"otpauth_uri": otpauthURI,
@@ -112,6 +117,10 @@ func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request)
 		Code string `json:"code"`
 	}
 	if !readLoginJSON(w, req, &body) {
+		return
+	}
+	ip, limitKeys := r.managementAttempt(w, req, user.ID)
+	if limitKeys == nil {
 		return
 	}
 	if r.twoFactor == nil {
@@ -139,7 +148,7 @@ func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request)
 		return
 	}
 	if !matched {
-		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		r.writeInvalidManagementCredential(w, req, user.ID, "enable_totp", ip, limitKeys, "invalid_two_factor_code", "invalid two factor code")
 		return
 	}
 	rawCodes, hashes, err := r.twoFactor.GenerateRecoveryCodes(user.ID)
@@ -161,6 +170,7 @@ func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request)
 		return
 	}
 	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_enabled", "two factor authentication enabled")
+	clearLoginFailures(r.managementLimiter, limitKeys)
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": rawCodes})
 }
 
@@ -176,8 +186,12 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	ip, limitKeys := r.managementAttempt(w, req, user.ID)
+	if limitKeys == nil {
+		return
+	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		r.writeInvalidManagementCredential(w, req, user.ID, "recovery_password", ip, limitKeys, "invalid_credentials", "invalid current password")
 		return
 	}
 	if r.twoFactor == nil {
@@ -205,7 +219,7 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 		return
 	}
 	if !matched {
-		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		r.writeInvalidManagementCredential(w, req, user.ID, "recovery_totp", ip, limitKeys, "invalid_two_factor_code", "invalid two factor code")
 		return
 	}
 	rawCodes, hashes, err := r.twoFactor.GenerateRecoveryCodes(user.ID)
@@ -218,6 +232,10 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 		codes[i] = store.RecoveryCodeInput{ID: uuid.NewString(), Hash: hash}
 	}
 	err = r.store.ReplaceRecoveryCodesAfterTOTP(req.Context(), user.ID, setting.ConfigurationID, counter, codes, now)
+	if errors.Is(err, store.ErrInvalidSecondFactor) {
+		r.writeInvalidManagementCredential(w, req, user.ID, "recovery_totp", ip, limitKeys, "invalid_two_factor_code", "invalid two factor code")
+		return
+	}
 	if writeRecoveryCodeRotationStoreError(w, err) {
 		return
 	}
@@ -226,6 +244,7 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 		return
 	}
 	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_recovery_codes_regenerated", "two factor recovery codes regenerated")
+	clearLoginFailures(r.managementLimiter, limitKeys)
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": rawCodes})
 }
 
@@ -253,8 +272,12 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	ip, limitKeys := r.managementAttempt(w, req, user.ID)
+	if limitKeys == nil {
+		return
+	}
 	if !auth.CheckPassword(user.PasswordHash, body.Password) {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid current password")
+		r.writeInvalidManagementCredential(w, req, user.ID, "disable_password", ip, limitKeys, "invalid_credentials", "invalid current password")
 		return
 	}
 	err := r.store.DisableTwoFactor(req.Context(), user.ID)
@@ -267,7 +290,31 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 		return
 	}
 	r.auditCommittedTwoFactorChange(req, user.ID, "two_factor_disabled", "two factor authentication disabled")
+	clearLoginFailures(r.managementLimiter, limitKeys)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (r *router) managementAttempt(w http.ResponseWriter, req *http.Request, userID string) (string, []string) {
+	ip := requestIP(req)
+	keys := managementLimitKeys(userID, ip)
+	if allowed, retryAfter := allowLoginAttempt(r.managementLimiter, keys); !allowed {
+		writeRateLimit(w, retryAfter)
+		return ip, nil
+	}
+	return ip, keys
+}
+
+func (r *router) writeInvalidManagementCredential(w http.ResponseWriter, req *http.Request, userID, stage, sourceIP string, limitKeys []string, code, message string) {
+	if blocked, retryAfter := recordLoginFailure(r.managementLimiter, limitKeys); blocked {
+		r.auditManagementRateLimit(req.Context(), userID, stage, sourceIP)
+		writeRateLimit(w, retryAfter)
+		return
+	}
+	writeError(w, http.StatusUnauthorized, code, message)
+}
+
+func managementLimitKeys(userID, sourceIP string) []string {
+	return []string{"user|" + userID, "source|" + sourceIP, "user_source|" + userID + "|" + sourceIP}
 }
 
 // auditCommittedTwoFactorChange 在状态提交后尽力记录审计。
@@ -342,6 +389,11 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
+	auditEvent, err := loginAuditEvent(user.ID, verifiedCode.method, now.UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
+		return
+	}
 	err = r.store.ConsumeLoginSecondFactor(req.Context(), store.ConsumeLoginSecondFactorParams{
 		ChallengeJTI:    challenge.JTI,
 		UserID:          challenge.UserID,
@@ -349,6 +401,7 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 		TOTPCounter:     verifiedCode.totpCounter,
 		RecoveryHash:    verifiedCode.recoveryHash,
 		Now:             now,
+		Audit:           auditEvent,
 	})
 	if errors.Is(err, store.ErrLoginRestartRequired) {
 		writeError(w, http.StatusUnauthorized, "login_restart_required", "restart login to continue")
@@ -364,7 +417,7 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 	}
 
 	clearLoginFailures(r.twoFactorLimiter, limitKeys)
-	r.completeLogin(w, req, user, verifiedCode.method)
+	r.finishLogin(w, user)
 }
 
 func (r *router) writeInvalidSecondFactor(w http.ResponseWriter, req *http.Request, userID, sourceIP string, limitKeys []string) {

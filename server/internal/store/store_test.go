@@ -111,6 +111,51 @@ func TestLoginChallengeLifecycle(t *testing.T) {
 	}
 }
 
+func TestConsumeLoginSecondFactorAuditFailureRollsBackTOTP(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 8, 30, 0, 0, time.UTC)
+	const userID = "audit-rollback-user"
+	const configurationID = "audit-rollback-configuration"
+	createEnabledTwoFactorFixture(t, ctx, db, userID, configurationID, 100, nil, now)
+	challenge := LoginChallenge{
+		JTI:             "audit-rollback-challenge",
+		UserID:          userID,
+		ConfigurationID: configurationID,
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}
+	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx, `
+		create trigger fail_login_audit before insert on audit_events
+		when new.event_type = 'login'
+		begin select raise(fail, 'audit failed'); end`); err != nil {
+		t.Fatalf("create audit trigger: %v", err)
+	}
+	params := ConsumeLoginSecondFactorParams{
+		ChallengeJTI:    challenge.JTI,
+		UserID:          userID,
+		ConfigurationID: configurationID,
+		TOTPCounter:     sql.NullInt64{Int64: 101, Valid: true},
+		Now:             now.Add(time.Minute),
+		Audit: AuditEvent{
+			ID: "audit-rollback-event", UserID: userID, EventType: "login",
+			Summary: "administrator logged in", MetadataJSON: `{"method":"totp"}`, CreatedAt: now.Add(time.Minute),
+		},
+	}
+	if err := db.ConsumeLoginSecondFactor(ctx, params); err == nil {
+		t.Fatal("audit insert failure should fail transaction")
+	}
+	if _, err := db.SQL.ExecContext(ctx, `drop trigger fail_login_audit`); err != nil {
+		t.Fatalf("drop audit trigger: %v", err)
+	}
+	if err := db.ConsumeLoginSecondFactor(ctx, params); err != nil {
+		t.Fatalf("retry after audit recovery: %v", err)
+	}
+}
+
 func TestMigrateCreatesLoginChallengeExpirationIndex(t *testing.T) {
 	ctx := context.Background()
 	db := openConcurrentStore(t, ctx)
@@ -163,8 +208,44 @@ func TestCreateLoginChallengeCleansAtMostOneHundredExpiredRows(t *testing.T) {
 		`select count(*) from login_challenges where jti in ('active-existing', 'active-new')`).Scan(&activeCount); err != nil {
 		t.Fatalf("count active challenges: %v", err)
 	}
-	if activeCount != 2 {
-		t.Fatalf("active challenge count = %d, want 2", activeCount)
+	if activeCount != 1 {
+		t.Fatalf("active challenge count = %d, want 1", activeCount)
+	}
+}
+
+func TestConcurrentCreateLoginChallengeLeavesOneActivePerUser(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 10, 30, 0, 0, time.UTC)
+	if _, err := db.CreateUser(ctx, User{ID: "concurrent-challenge-user", Username: "concurrent-challenge-user", PasswordHash: "hash"}); err != nil {
+		t.Fatalf("create challenge user: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, jti := range []string{"concurrent-challenge-1", "concurrent-challenge-2"} {
+		jti := jti
+		go func() {
+			<-start
+			results <- db.CreateLoginChallenge(ctx, LoginChallenge{
+				JTI: jti, UserID: "concurrent-challenge-user", ConfigurationID: "configuration",
+				ExpiresAt: now.Add(5 * time.Minute), CreatedAt: now,
+			})
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent create challenge: %v", err)
+		}
+	}
+	var active int
+	if err := db.SQL.QueryRowContext(ctx,
+		`select count(*) from login_challenges where user_id = ? and consumed_at is null and expires_at >= ?`,
+		"concurrent-challenge-user", now).Scan(&active); err != nil {
+		t.Fatalf("count active challenges: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("active challenge count = %d, want 1", active)
 	}
 }
 

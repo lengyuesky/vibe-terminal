@@ -42,19 +42,20 @@ type AuditWriter interface {
 }
 
 type Deps struct {
-	Store            *store.DB
-	Sessions         *auth.SessionManager
-	TwoFactor        *auth.TwoFactorManager
-	PasswordLimiter  *auth.FailureLimiter
-	TwoFactorLimiter *auth.FailureLimiter
-	Now              func() time.Time
-	Presence         *devices.Presence
-	Audit            AuditWriter
-	Hub              *wshub.Hub
-	Output           terminal.OutputStore
-	StaticFiles      http.FileSystem
-	Files            FsService
-	FsMaxUploadSize  int64
+	Store             *store.DB
+	Sessions          *auth.SessionManager
+	TwoFactor         *auth.TwoFactorManager
+	PasswordLimiter   *auth.FailureLimiter
+	TwoFactorLimiter  *auth.FailureLimiter
+	ManagementLimiter *auth.FailureLimiter
+	Now               func() time.Time
+	Presence          *devices.Presence
+	Audit             AuditWriter
+	Hub               *wshub.Hub
+	Output            terminal.OutputStore
+	StaticFiles       http.FileSystem
+	Files             FsService
+	FsMaxUploadSize   int64
 }
 
 type router struct {
@@ -63,6 +64,7 @@ type router struct {
 	twoFactor                  *auth.TwoFactorManager
 	passwordLimiter            *auth.FailureLimiter
 	twoFactorLimiter           *auth.FailureLimiter
+	managementLimiter          *auth.FailureLimiter
 	beforePendingTwoFactorSave func()
 	now                        func() time.Time
 	presence                   *devices.Presence
@@ -85,6 +87,9 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.TwoFactorLimiter == nil {
 		deps.TwoFactorLimiter = auth.NewFailureLimiter(5, 5*time.Minute, 15*time.Minute, 5000, deps.Now)
 	}
+	if deps.ManagementLimiter == nil {
+		deps.ManagementLimiter = auth.NewFailureLimiter(5, 10*time.Minute, 15*time.Minute, 5000, deps.Now)
+	}
 	if deps.Presence == nil {
 		deps.Presence = devices.NewPresence()
 	}
@@ -101,20 +106,21 @@ func NewRouter(deps Deps) http.Handler {
 		deps.FsMaxUploadSize = 512 << 20
 	}
 	r := &router{
-		store:            deps.Store,
-		sessions:         deps.Sessions,
-		twoFactor:        deps.TwoFactor,
-		passwordLimiter:  deps.PasswordLimiter,
-		twoFactorLimiter: deps.TwoFactorLimiter,
-		now:              deps.Now,
-		presence:         deps.Presence,
-		audit:            deps.Audit,
-		hub:              deps.Hub,
-		output:           deps.Output,
-		static:           deps.StaticFiles,
-		files:            deps.Files,
-		fsMaxUpload:      deps.FsMaxUploadSize,
-		mux:              http.NewServeMux(),
+		store:             deps.Store,
+		sessions:          deps.Sessions,
+		twoFactor:         deps.TwoFactor,
+		passwordLimiter:   deps.PasswordLimiter,
+		twoFactorLimiter:  deps.TwoFactorLimiter,
+		managementLimiter: deps.ManagementLimiter,
+		now:               deps.Now,
+		presence:          deps.Presence,
+		audit:             deps.Audit,
+		hub:               deps.Hub,
+		output:            deps.Output,
+		static:            deps.StaticFiles,
+		files:             deps.Files,
+		fsMaxUpload:       deps.FsMaxUploadSize,
+		mux:               http.NewServeMux(),
 	}
 	r.routes()
 	return r
@@ -219,20 +225,34 @@ func (r *router) handleLogin(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) completeLogin(w http.ResponseWriter, req *http.Request, user store.User, method string) {
-	metadataJSON, err := json.Marshal(map[string]string{"method": method})
+	event, err := loginAuditEvent(user.ID, method, r.now().UTC())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
 		return
 	}
-	if err := r.audit.Log(req.Context(), store.AuditEvent{
-		UserID:       user.ID,
-		EventType:    "login",
-		Summary:      "administrator logged in",
-		MetadataJSON: string(metadataJSON),
-	}); err != nil {
+	if err := r.audit.Log(req.Context(), event); err != nil {
 		writeError(w, http.StatusInternalServerError, "audit_unavailable", "failed to record login audit")
 		return
 	}
+	r.finishLogin(w, user)
+}
+
+func loginAuditEvent(userID, method string, now time.Time) (store.AuditEvent, error) {
+	metadataJSON, err := json.Marshal(map[string]string{"method": method})
+	if err != nil {
+		return store.AuditEvent{}, err
+	}
+	return store.AuditEvent{
+		ID:           uuid.NewString(),
+		UserID:       userID,
+		EventType:    "login",
+		Summary:      "administrator logged in",
+		MetadataJSON: string(metadataJSON),
+		CreatedAt:    now,
+	}, nil
+}
+
+func (r *router) finishLogin(w http.ResponseWriter, user store.User) {
 	if err := r.sessions.Set(w, user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "failed to create session")
 		return
@@ -253,6 +273,17 @@ func (r *router) auditLoginRateLimit(ctx context.Context, userID, stage, sourceI
 		EventType:    "login_rate_limited",
 		Summary:      "login attempts rate limited",
 		MetadataJSON: string(metadataJSON),
+	})
+}
+
+func (r *router) auditManagementRateLimit(ctx context.Context, userID, stage, sourceIP string) {
+	metadataJSON, err := json.Marshal(map[string]string{"stage": stage, "source_ip": sourceIP})
+	if err != nil {
+		return
+	}
+	_ = r.audit.Log(ctx, store.AuditEvent{
+		UserID: userID, EventType: "management_reauthentication_rate_limited",
+		Summary: "management reauthentication attempts rate limited", MetadataJSON: string(metadataJSON),
 	})
 }
 

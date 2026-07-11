@@ -67,6 +67,7 @@ type ConsumeLoginSecondFactorParams struct {
 	TOTPCounter     sql.NullInt64
 	RecoveryHash    string
 	Now             time.Time
+	Audit           AuditEvent
 }
 
 // RecoveryCodeInput 表示待持久化的恢复码标识和哈希。
@@ -331,6 +332,11 @@ func (db *DB) CreateLoginChallenge(ctx context.Context, challenge LoginChallenge
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
+		`delete from login_challenges where user_id = ? and consumed_at is null and expires_at >= ?`,
+		challenge.UserID, challenge.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`insert into login_challenges (jti, user_id, configuration_id, expires_at, consumed_at, created_at)
 		 values (?, ?, ?, ?, null, ?)`,
 		challenge.JTI, challenge.UserID, challenge.ConfigurationID, challenge.ExpiresAt, challenge.CreatedAt); err != nil {
@@ -391,6 +397,11 @@ func (db *DB) ConsumeLoginSecondFactor(ctx context.Context, params ConsumeLoginS
 			 where user_id = ? and code_hash = ? and used_at is null`,
 			now, params.UserID, params.RecoveryHash)
 		if err := requireAffected(result, err, ErrInvalidSecondFactor); err != nil {
+			return err
+		}
+	}
+	if params.Audit.EventType != "" {
+		if err := insertAuditEvent(ctx, tx, params.Audit); err != nil {
 			return err
 		}
 	}
@@ -919,11 +930,20 @@ func (db *DB) CreateAuditEvent(ctx context.Context, event AuditEvent) (AuditEven
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	_, err := db.SQL.ExecContext(ctx,
+	err := insertAuditEvent(ctx, db.SQL, event)
+	return event, err
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertAuditEvent(ctx context.Context, execer contextExecer, event AuditEvent) error {
+	_, err := execer.ExecContext(ctx,
 		`insert into audit_events (id, user_id, device_id, session_id, event_type, summary, metadata_json, created_at)
 		 values (?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID, event.UserID, event.DeviceID, event.SessionID, event.EventType, event.Summary, event.MetadataJSON, event.CreatedAt)
-	return event, err
+	return err
 }
 
 func (db *DB) CreateOutputChunk(ctx context.Context, chunk OutputChunk) (OutputChunk, error) {

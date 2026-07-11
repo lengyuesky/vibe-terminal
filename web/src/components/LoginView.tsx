@@ -1,5 +1,5 @@
 import { Terminal } from 'lucide-react';
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { APIError, type LoginResult } from '../api';
 
 type LoginViewProps = {
@@ -17,6 +17,23 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const submittingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const requestGenerationRef = useRef(0);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
+  const codeInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (step === 'second_factor') codeInputRef.current?.focus();
+    else passwordInputRef.current?.focus();
+  }, [step]);
 
   function clearSecondFactorState() {
     setStep('password');
@@ -33,11 +50,13 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
   async function submitPassword(event: FormEvent) {
     event.preventDefault();
     if (submittingRef.current) return;
+    const requestGeneration = ++requestGenerationRef.current;
     submittingRef.current = true;
     setSubmitting(true);
     setError('');
     try {
       const result = await onLogin(username, password);
+      if (!mountedRef.current || requestGeneration !== requestGenerationRef.current) return;
       if (result.status === 'two_factor_required') {
         setPassword('');
         setChallengeToken(result.challengeToken);
@@ -46,34 +65,38 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
         setStep('second_factor');
       }
     } catch (caught) {
+      if (!mountedRef.current || requestGeneration !== requestGenerationRef.current) return;
       setError(errorMessage(caught, 'login failed'));
     } finally {
       submittingRef.current = false;
-      setSubmitting(false);
+      if (mountedRef.current && requestGeneration === requestGenerationRef.current) setSubmitting(false);
     }
   }
 
   async function submitSecondFactor(event: FormEvent) {
     event.preventDefault();
     if (submittingRef.current || !challengeToken || !code.trim()) return;
+    const requestGeneration = ++requestGenerationRef.current;
     submittingRef.current = true;
     setSubmitting(true);
     setError('');
     try {
       await onVerifyTwoFactor(challengeToken, code.trim());
     } catch (caught) {
+      if (!mountedRef.current || requestGeneration !== requestGenerationRef.current) return;
       if (caught instanceof APIError && caught.code === 'login_restart_required') {
         clearSecondFactorState();
       }
       setError(errorMessage(caught, 'two-factor verification failed'));
     } finally {
       submittingRef.current = false;
-      setSubmitting(false);
+      if (mountedRef.current && requestGeneration === requestGenerationRef.current) setSubmitting(false);
     }
   }
 
   function backToLogin() {
     if (submittingRef.current) return;
+    requestGenerationRef.current += 1;
     clearSecondFactorState();
     setError('');
   }
@@ -106,7 +129,10 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
             <label>
               Password
               <input
+                ref={passwordInputRef}
                 autoComplete="current-password"
+                aria-describedby={error ? 'login-error' : undefined}
+                aria-invalid={error ? true : undefined}
                 disabled={submitting}
                 type="password"
                 value={password}
@@ -120,7 +146,10 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
             <label>
               {recoveryMode ? 'Recovery code' : 'Authenticator code'}
               <input
+                ref={codeInputRef}
                 autoComplete="one-time-code"
+                aria-describedby={error ? 'login-error' : undefined}
+                aria-invalid={error ? true : undefined}
                 disabled={submitting}
                 inputMode={recoveryMode ? undefined : 'numeric'}
                 value={code}
@@ -136,7 +165,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
           </>
         )}
         {error && (
-          <p className="error" role="alert">
+          <p className="error" id="login-error" role="alert">
             {error}
           </p>
         )}

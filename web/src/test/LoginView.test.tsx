@@ -28,6 +28,7 @@ describe('LoginView', () => {
 
     expect(await screen.findByRole('heading', { name: 'Two-factor authentication' })).toBeInTheDocument();
     const code = screen.getByLabelText('Authenticator code');
+    expect(code).toHaveFocus();
     expect(code).toHaveAttribute('autocomplete', 'one-time-code');
     await userEvent.type(code, '123456');
     await userEvent.click(screen.getByRole('button', { name: 'Verify' }));
@@ -59,8 +60,11 @@ describe('LoginView', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Verify' }));
 
     expect(await screen.findByLabelText('Password')).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toHaveFocus();
     expect(screen.getByLabelText('Password')).toHaveValue('');
     expect(screen.getByRole('alert')).toHaveTextContent('restart login to continue');
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-describedby', 'login-error');
     expect(screen.queryByLabelText('Recovery code')).not.toBeInTheDocument();
   });
 
@@ -78,6 +82,7 @@ describe('LoginView', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Back to login' }));
 
     expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toHaveFocus();
     expect(screen.getByLabelText('Password')).toHaveValue('');
     await userEvent.type(screen.getByLabelText('Password'), 'secret');
     await userEvent.click(screen.getByRole('button', { name: 'Login' }));
@@ -127,6 +132,27 @@ describe('LoginView', () => {
     await submitPassword(onLogin);
 
     expect(screen.getByRole('alert')).toHaveTextContent('bad credentials');
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-describedby', 'login-error');
     expect(screen.getByRole('button', { name: 'Login' })).not.toBeDisabled();
+  });
+
+  it('卸载后忽略延迟登录结果', async () => {
+    let resolveLogin!: (result: LoginResult) => void;
+    const onLogin = vi.fn().mockReturnValue(
+      new Promise<LoginResult>((resolve) => {
+        resolveLogin = resolve;
+      })
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { unmount } = render(<LoginView onLogin={onLogin} onVerifyTwoFactor={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+
+    unmount();
+    resolveLogin(challenge);
+    await Promise.resolve();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

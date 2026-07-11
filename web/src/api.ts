@@ -51,9 +51,9 @@ export class APIError extends Error {
 
 function retryAfterSeconds(response: Response): number | undefined {
   const value = response.headers.get('Retry-After')?.trim();
-  if (!value) return undefined;
+  if (!value || !/^\d+$/.test(value)) return undefined;
   const seconds = Number(value);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+  return Number.isSafeInteger(seconds) ? seconds : undefined;
 }
 
 async function toAPIError(response: Response): Promise<APIError> {
@@ -75,15 +75,14 @@ async function toAPIError(response: Response): Promise<APIError> {
   return new APIError(response.status, code, message, retryAfterSeconds(response));
 }
 
-async function fetchResponse(path: string, init?: RequestInit): Promise<Response> {
+export async function fetchResponse(path: string, init?: RequestInit): Promise<Response> {
   let response: Response;
   try {
+    const headers = new Headers(init?.headers);
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     response = await fetch(path, {
       ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-      },
+      headers,
       credentials: 'include',
     });
   } catch (error) {
@@ -164,6 +163,9 @@ export async function verifyTwoFactor(challengeToken: string, code: string): Pro
     method: 'POST',
     body: JSON.stringify({ challenge_token: challengeToken, code }),
   });
+  if (response.status !== 200) {
+    throw new APIError(response.status, 'invalid_response', 'server returned an invalid verification response');
+  }
   return parseUser(await responseJSON(response), response.status);
 }
 

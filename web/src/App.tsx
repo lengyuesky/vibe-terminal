@@ -169,9 +169,7 @@ export function AppView({
   devices,
   sessions,
   onLogin,
-  onVerifyTwoFactor = async () => {
-    throw new Error('two-factor verification is unavailable');
-  },
+  onVerifyTwoFactor,
   onCloseSession,
   onCreateSession,
   onRenameDevice = async () => undefined,
@@ -189,7 +187,7 @@ export function AppView({
   devices: Device[];
   sessions: SessionsByDevice;
   onLogin: (username: string, password: string) => Promise<LoginResult>;
-  onVerifyTwoFactor?: (challengeToken: string, code: string) => Promise<void>;
+  onVerifyTwoFactor: (challengeToken: string, code: string) => Promise<void>;
   onCloseSession: (sessionId: string) => Promise<void>;
   onCreateSession: (deviceId: string) => Promise<Session | void>;
   onRenameDevice?: (deviceId: string, name: string) => Promise<Device | void>;

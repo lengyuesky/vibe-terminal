@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { APIError, login, me, verifyTwoFactor } from '../api';
+import { APIError, fetchResponse, login, me, verifyTwoFactor } from '../api';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
@@ -21,12 +21,15 @@ describe('登录 API', () => {
       status: 'authenticated',
       user: { id: 'user-1', username: 'admin' },
     });
-    expect(fetchMock).toHaveBeenCalledWith('/api/login', {
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/login');
+    expect(init).toMatchObject({
       method: 'POST',
       body: JSON.stringify({ username: 'admin', password: 'secret' }),
-      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
     });
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
   });
 
   it('解析 202 二因素挑战', async () => {
@@ -71,12 +74,67 @@ describe('登录 API', () => {
       id: 'user-1',
       username: 'admin',
     });
-    expect(fetchMock).toHaveBeenCalledWith('/api/login/2fa', {
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/login/2fa');
+    expect(init).toMatchObject({
       method: 'POST',
       body: JSON.stringify({ challenge_token: 'challenge-1', code: '123456' }),
-      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
     });
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
+  });
+
+  it.each([201, 202, 204])('拒绝第二因素意外成功状态 %s', async (status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        status === 204
+          ? new Response(null, { status })
+          : jsonResponse(status, { id: 'user-1', username: 'admin' })
+      )
+    );
+
+    await expect(verifyTwoFactor('challenge-1', '123456')).rejects.toMatchObject({
+      status,
+      code: 'invalid_response',
+    });
+  });
+
+  it('拒绝第二因素 200 空响应和非 JSON 响应', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 200 })));
+    await expect(verifyTwoFactor('challenge-1', '123456')).rejects.toMatchObject({ code: 'invalid_response' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not-json', { status: 200 })));
+    await expect(verifyTwoFactor('challenge-1', '123456')).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+});
+
+describe('统一请求头', () => {
+  it.each([
+    { name: '对象', headers: { Accept: 'application/json' }, expected: 'application/json' },
+    { name: 'Headers', headers: new Headers({ Accept: 'text/plain' }), expected: 'text/plain' },
+    { name: '元组', headers: [['Accept', 'application/problem+json']] as [string, string][], expected: 'application/problem+json' },
+  ])('兼容 $name 形式并补默认 Content-Type', async ({ headers, expected }) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchResponse('/api/example', { headers });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const sent = new Headers(init.headers);
+    expect(sent.get('Accept')).toBe(expected);
+    expect(sent.get('Content-Type')).toBe('application/json');
+    expect(init.credentials).toBe('include');
+  });
+
+  it('保留调用方显式 Content-Type', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchResponse('/api/upload', { headers: new Headers({ 'Content-Type': 'text/plain' }), credentials: 'omit' });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).get('Content-Type')).toBe('text/plain');
+    expect(init.credentials).toBe('include');
   });
 });
 
@@ -88,7 +146,7 @@ describe('统一 API 错误', () => {
         jsonResponse(
           429,
           { code: 'too_many_attempts', message: 'too many login attempts' },
-          { 'Retry-After': '12.5' }
+          { 'Retry-After': '12' }
         )
       )
     );
@@ -99,11 +157,11 @@ describe('统一 API 错误', () => {
       status: 429,
       code: 'too_many_attempts',
       message: 'too many login attempts',
-      retryAfter: 12.5,
+      retryAfter: 12,
     });
   });
 
-  it.each(['-1', 'Infinity', 'NaN', ''])('忽略无效 Retry-After：%s', async (retryAfter) => {
+  it.each(['-1', '12.5', 'Infinity', 'NaN', ''])('忽略无效 Retry-After：%s', async (retryAfter) => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(

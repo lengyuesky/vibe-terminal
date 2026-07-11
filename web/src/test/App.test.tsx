@@ -4,25 +4,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView } from '../App';
 import * as api from '../api';
 
-vi.mock('../api', () => ({
-  closeSession: vi.fn(),
-  createAgentToken: vi.fn(),
-  createSession: vi.fn(),
-  deleteAgentToken: vi.fn(),
-  listDeviceFiles: vi.fn(),
-  deviceFileURL: vi.fn(() => ''),
-  uploadDeviceFile: vi.fn(),
-  listDevices: vi.fn(),
-  listAgentTokens: vi.fn(),
-  listSessionOutput: vi.fn(),
-  listSessions: vi.fn(),
-  listSnippets: vi.fn(() => Promise.resolve([])),
-  login: vi.fn(),
-  me: vi.fn(),
-  revokeAgentToken: vi.fn(),
-  renameDevice: vi.fn(),
-  renameSession: vi.fn(),
-}));
+vi.mock('../api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api')>();
+  return {
+    ...actual,
+    closeSession: vi.fn(),
+    createAgentToken: vi.fn(),
+    createSession: vi.fn(),
+    deleteAgentToken: vi.fn(),
+    listDeviceFiles: vi.fn(),
+    deviceFileURL: vi.fn(() => ''),
+    uploadDeviceFile: vi.fn(),
+    listDevices: vi.fn(),
+    listAgentTokens: vi.fn(),
+    listSessionOutput: vi.fn(),
+    listSessions: vi.fn(),
+    listSnippets: vi.fn(() => Promise.resolve([])),
+    login: vi.fn(),
+    me: vi.fn(),
+    revokeAgentToken: vi.fn(),
+    renameDevice: vi.fn(),
+    renameSession: vi.fn(),
+    verifyTwoFactor: vi.fn(),
+  };
+});
 
 const mockedApi = vi.mocked(api);
 
@@ -38,6 +43,7 @@ describe('AppView', () => {
         devices={[]}
         sessions={{}}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -63,6 +69,7 @@ describe('AppView', () => {
         devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
         sessions={{}}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={createSession}
         onRenameSession={vi.fn()}
@@ -108,6 +115,7 @@ describe('AppView', () => {
           ],
         }}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -144,6 +152,7 @@ describe('AppView', () => {
           ],
         }}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -181,6 +190,7 @@ describe('AppView', () => {
           ],
         }}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -213,6 +223,7 @@ describe('AppView', () => {
         devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
         sessions={{}}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -249,6 +260,7 @@ describe('AppView', () => {
           ],
         }}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -280,6 +292,7 @@ describe('AppView', () => {
         devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
         sessions={{ 'dev-1': [{ id: 'sess-1', title: 'bash', status: 'running', working_directory: '/tmp/project' }] }}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={closeSession}
         onCreateSession={vi.fn()}
         onRenameSession={renameSession}
@@ -328,6 +341,7 @@ describe('AppView', () => {
         tokenLoading={false}
         tokenError={null}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -372,6 +386,7 @@ describe('AppView', () => {
         tokenLoading={false}
         tokenError={null}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -413,6 +428,7 @@ describe('AppView', () => {
         devices={[{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }]}
         sessions={{}}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -449,6 +465,7 @@ describe('AppView', () => {
         tokenLoading={false}
         tokenError={null}
         onLogin={vi.fn()}
+        onVerifyTwoFactor={vi.fn()}
         onCloseSession={vi.fn()}
         onCreateSession={vi.fn()}
         onRenameSession={vi.fn()}
@@ -464,5 +481,70 @@ describe('AppView', () => {
     expect(deleteToken).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: /confirm delete/i }));
     expect(deleteToken).toHaveBeenCalledWith('tok-revoked');
+  });
+
+  it('收到 202 挑战时不进入主界面', async () => {
+    mockedApi.me.mockRejectedValue(new Error('unauthorized'));
+    mockedApi.login.mockResolvedValue({
+      status: 'two_factor_required',
+      challengeToken: 'challenge-1',
+      expiresIn: 300,
+    });
+    render(<App />);
+
+    await userEvent.type(await screen.findByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+
+    expect(await screen.findByRole('heading', { name: 'Two-factor authentication' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+    expect(mockedApi.verifyTwoFactor).not.toHaveBeenCalled();
+  });
+
+  it('第二因素 200 后才进入主界面，延迟成功卸载不产生状态更新告警', async () => {
+    let resolveVerification!: (user: api.User) => void;
+    mockedApi.me.mockRejectedValue(new Error('unauthorized'));
+    mockedApi.login.mockResolvedValue({
+      status: 'two_factor_required',
+      challengeToken: 'challenge-1',
+      expiresIn: 300,
+    });
+    mockedApi.verifyTwoFactor.mockReturnValue(
+      new Promise<api.User>((resolve) => {
+        resolveVerification = resolve;
+      })
+    );
+    mockedApi.listDevices.mockResolvedValue([]);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Verify' }));
+
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+    resolveVerification({ id: 'user-1', username: 'admin' });
+    expect(await screen.findByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+    expect(mockedApi.verifyTwoFactor).toHaveBeenCalledWith('challenge-1', '123456');
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('第二因素失败时保留验证页且不进入主界面', async () => {
+    mockedApi.me.mockRejectedValue(new Error('unauthorized'));
+    mockedApi.login.mockResolvedValue({
+      status: 'two_factor_required',
+      challengeToken: 'challenge-1',
+      expiresIn: 300,
+    });
+    mockedApi.verifyTwoFactor.mockRejectedValue(new Error('invalid two factor code'));
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await userEvent.type(await screen.findByLabelText('Authenticator code'), '000000');
+    await userEvent.click(screen.getByRole('button', { name: 'Verify' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid two factor code');
+    expect(screen.getByRole('heading', { name: 'Two-factor authentication' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
   });
 });

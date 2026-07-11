@@ -1603,3 +1603,82 @@ button.fileName:hover {
   color: var(--danger);
   font-size: 12px;
 }
+
+/* ===== 设置页 ===== */
+.settingsPage {
+  min-width: 0;
+  overflow: auto;
+  padding: 28px;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.settingsPage > h1 {
+  margin: 0;
+  font-size: 22px;
+  color: var(--text);
+}
+
+.settingsTabs {
+  display: flex;
+  gap: 8px;
+}
+
+.settingsTabs button {
+  padding: 8px 18px;
+  border-radius: var(--r-pill);
+}
+
+.settingsTabs button.active {
+  background: var(--accent-soft);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+  box-shadow: 0 0 18px rgba(167, 139, 250, 0.18);
+}
+
+.settingsPanel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  width: min(820px, 100%);
+  padding: 24px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-card);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+.settingsPanel h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.settingsPanel p {
+  margin: 0;
+}
+
+.languageOptions {
+  display: flex;
+  gap: 10px;
+}
+
+.languageOptions button {
+  min-width: 110px;
+  justify-content: center;
+}
+
+.languageOptions button.active {
+  background: var(--accent-soft);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+}
+
+/* 设置页内嵌安全分区:复用 .securityPage 全部后代样式,去掉页面级留白 */
+.securityPage.settingsSecurityHost {
+  padding: 0;
+  overflow: visible;
+}

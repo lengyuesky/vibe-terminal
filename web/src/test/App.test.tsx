@@ -12,6 +12,9 @@ vi.mock('../api', async (importOriginal) => {
     createAgentToken: vi.fn(),
     createSession: vi.fn(),
     deleteAgentToken: vi.fn(),
+    disableTwoFactor: vi.fn(),
+    enableTwoFactor: vi.fn(),
+    getTwoFactorStatus: vi.fn(),
     listDeviceFiles: vi.fn(),
     deviceFileURL: vi.fn(() => ''),
     uploadDeviceFile: vi.fn(),
@@ -25,6 +28,8 @@ vi.mock('../api', async (importOriginal) => {
     revokeAgentToken: vi.fn(),
     renameDevice: vi.fn(),
     renameSession: vi.fn(),
+    regenerateRecoveryCodes: vi.fn(),
+    startTwoFactorSetup: vi.fn(),
     verifyTwoFactor: vi.fn(),
   };
 });
@@ -43,7 +48,31 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mockedApi.getTwoFactorStatus.mockResolvedValue({ enabled: false, recoveryCodesRemaining: 0 });
 });
+
+function loggedInAppViewProps(
+  overrides: Partial<Parameters<typeof AppView>[0]> = {}
+): Parameters<typeof AppView>[0] {
+  return {
+    user: { id: 'user-1', username: 'admin' },
+    devices: [],
+    sessions: {},
+    onLogin: vi.fn(),
+    onVerifyTwoFactor: vi.fn(),
+    onCloseSession: vi.fn(),
+    onCreateSession: vi.fn(),
+    onRenameSession: vi.fn(),
+    agentTokens: [],
+    createdAgentToken: null,
+    tokenLoading: false,
+    tokenError: null,
+    onCreateAgentToken: vi.fn(),
+    onRevokeAgentToken: vi.fn(),
+    onRefreshAgentTokens: vi.fn(),
+    ...overrides,
+  };
+}
 
 describe('AppView', () => {
   it('shows login when there is no user', () => {
@@ -67,6 +96,21 @@ describe('AppView', () => {
       />
     );
     expect(screen.getByRole('button', { name: /login/i })).toBeInTheDocument();
+  });
+
+  it('二因素登录提供提示和可样式化的Back按钮', async () => {
+    const onLogin = vi.fn().mockResolvedValue({
+      status: 'two_factor_required',
+      challengeToken: 'challenge-1',
+      expiresIn: 300,
+    });
+    render(<AppView {...loggedInAppViewProps({ user: null, onLogin })} />);
+
+    await userEvent.type(screen.getByLabelText('Password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Login' }));
+
+    expect(await screen.findByText('Enter the code from your authenticator app.')).toHaveClass('loginHint');
+    expect(screen.getByRole('button', { name: 'Back to login' })).toHaveClass('loginBackButton');
   });
 
   it('opens multiple terminal tabs for an online device', async () => {
@@ -367,6 +411,101 @@ describe('AppView', () => {
     expect(screen.getByText('laptop')).toBeInTheDocument();
     expect(screen.getByText('available')).toBeInTheDocument();
     expect(refresh).toHaveBeenCalled();
+  });
+
+  it('通过可访问侧栏按钮打开Security并请求状态', async () => {
+    render(<AppView {...loggedInAppViewProps()} />);
+
+    const security = screen.getByRole('button', { name: 'Security' });
+    expect(security.tagName).toBe('BUTTON');
+    security.focus();
+    await userEvent.keyboard('{Enter}');
+
+    expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
+    expect(await screen.findByText('Two-factor authentication is disabled.')).toBeInTheDocument();
+    expect(mockedApi.getTwoFactorStatus).toHaveBeenCalledOnce();
+  });
+
+  it('标记当前导航并在Security往返时保留终端和Token状态', async () => {
+    const createSession = vi.fn().mockResolvedValue({
+      id: 'sess-preserved',
+      title: 'bash',
+      status: 'running',
+      working_directory: '/srv/preserved',
+    });
+    render(
+      <AppView
+        {...loggedInAppViewProps({
+          devices: [{ id: 'dev-1', name: 'laptop', platform: 'linux', online: true }],
+          onCreateSession: createSession,
+          agentTokens: [{
+            id: 'tok-preserved',
+            name: 'preserved-token',
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          }],
+        })}
+      />
+    );
+
+    const terminals = screen.getByRole('button', { name: 'Terminals' });
+    const security = screen.getByRole('button', { name: 'Security' });
+    const agentTokens = screen.getByRole('button', { name: 'Agent Tokens' });
+    expect(terminals).toHaveAttribute('aria-current', 'page');
+    await userEvent.click(screen.getByRole('button', { name: /new terminal/i }));
+    expect(await screen.findByRole('tab', { name: /sess-pre/i })).toBeInTheDocument();
+
+    await userEvent.click(security);
+    expect(security).toHaveAttribute('aria-current', 'page');
+    expect(terminals).not.toHaveAttribute('aria-current');
+    await userEvent.click(terminals);
+    expect(screen.getByRole('tab', { name: /sess-pre/i })).toBeInTheDocument();
+
+    await userEvent.click(agentTokens);
+    expect(agentTokens).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('preserved-token')).toBeInTheDocument();
+    await userEvent.click(security);
+    await userEvent.click(agentTokens);
+    expect(screen.getByText('preserved-token')).toBeInTheDocument();
+  });
+
+  it('未登录时不显示Security导航', () => {
+    render(<AppView {...loggedInAppViewProps({ user: null })} />);
+
+    expect(screen.queryByRole('button', { name: 'Security' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+  });
+
+  it('Security卸载后延迟状态请求不会污染当前终端视图', async () => {
+    const status = deferred<api.TwoFactorStatus>();
+    mockedApi.getTwoFactorStatus.mockReturnValue(status.promise);
+    render(<AppView {...loggedInAppViewProps()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    expect(screen.getByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminals' }));
+    await act(async () => {
+      status.resolve({ enabled: true, recoveryCodesRemaining: 8 });
+      await status.promise;
+    });
+
+    expect(screen.queryByRole('heading', { name: 'Two-factor security' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByText('8 recovery codes remaining.')).not.toBeInTheDocument();
+  });
+
+  it('登出或切换用户后回到终端默认视图', async () => {
+    const props = loggedInAppViewProps();
+    const { rerender } = render(<AppView {...props} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
+
+    rerender(<AppView {...props} user={null} />);
+    expect(screen.getByRole('button', { name: 'Login' })).toBeInTheDocument();
+    rerender(<AppView {...props} user={{ id: 'user-2', username: 'operator' }} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page'));
+    expect(screen.queryByRole('heading', { name: 'Two-factor security' })).not.toBeInTheDocument();
   });
 
   it('creates and revokes agent tokens from the management view', async () => {

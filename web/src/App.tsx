@@ -1,4 +1,4 @@
-import { KeyRound, Monitor, Terminal } from 'lucide-react';
+import { KeyRound, Monitor, ShieldCheck, Terminal } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
@@ -6,10 +6,11 @@ import { AgentTokenManager } from './components/AgentTokenManager';
 import { DeviceList } from './components/DeviceList';
 import { FileManagerPanel } from './components/FileManagerPanel';
 import { LoginView } from './components/LoginView';
+import { SecurityView } from './components/SecurityView';
 import { TerminalTabs } from './components/TerminalTabs';
 
 type SessionsByDevice = Record<string, Session[]>;
-type ViewMode = 'terminals' | 'agentTokens';
+type ViewMode = 'terminals' | 'agentTokens' | 'security';
 
 function enrichSessionDevice(session: Session, deviceId: string, device?: Device): Session {
   return {
@@ -234,6 +235,7 @@ export function AppView({
   const [localSessions, setLocalSessions] = useState<Session[]>(initialSessions);
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
   const [filesDevice, setFilesDevice] = useState<Device | null>(null);
+  const previousUserIDRef = useRef(user?.id);
 
   useEffect(() => {
     setLocalDevices(devices);
@@ -242,6 +244,15 @@ export function AppView({
   useEffect(() => {
     setLocalSessions(initialSessions);
   }, [initialSessions]);
+
+  useEffect(() => {
+    const userID = user?.id;
+    if (previousUserIDRef.current !== userID) {
+      previousUserIDRef.current = userID;
+      setViewMode('terminals');
+      setFilesDevice(null);
+    }
+  }, [user?.id]);
 
   async function createAndAppend(deviceId: string) {
     const session = await onCreateSession(deviceId);
@@ -275,13 +286,32 @@ export function AppView({
           <span>vibe-terminal</span>
         </div>
         <nav className="sideNav" aria-label="Primary">
-          <button className={viewMode === 'terminals' ? 'active' : ''} onClick={() => setViewMode('terminals')}>
+          <button
+            type="button"
+            aria-current={viewMode === 'terminals' ? 'page' : undefined}
+            className={viewMode === 'terminals' ? 'active' : ''}
+            onClick={() => setViewMode('terminals')}
+          >
             <Monitor size={16} aria-hidden="true" />
             Terminals
           </button>
-          <button className={viewMode === 'agentTokens' ? 'active' : ''} onClick={() => setViewMode('agentTokens')}>
+          <button
+            type="button"
+            aria-current={viewMode === 'agentTokens' ? 'page' : undefined}
+            className={viewMode === 'agentTokens' ? 'active' : ''}
+            onClick={() => setViewMode('agentTokens')}
+          >
             <KeyRound size={16} aria-hidden="true" />
             Agent Tokens
+          </button>
+          <button
+            type="button"
+            aria-current={viewMode === 'security' ? 'page' : undefined}
+            className={viewMode === 'security' ? 'active' : ''}
+            onClick={() => setViewMode('security')}
+          >
+            <ShieldCheck size={16} aria-hidden="true" />
+            Security
           </button>
         </nav>
         <DeviceList
@@ -299,7 +329,7 @@ export function AppView({
           onCloseSession={onCloseSession}
           onRenameSession={onRenameSession}
         />
-      ) : (
+      ) : viewMode === 'agentTokens' ? (
         <AgentTokenManager
           tokens={agentTokens}
           loading={tokenLoading}
@@ -310,6 +340,10 @@ export function AppView({
           onDelete={onDeleteAgentToken}
           onRefresh={onRefreshAgentTokens}
         />
+      ) : (
+        <main className="securityPage">
+          <SecurityView />
+        </main>
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}
     </div>

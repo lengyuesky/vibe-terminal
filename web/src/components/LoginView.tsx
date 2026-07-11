@@ -143,6 +143,11 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
         ) : (
           <>
             <h2>Two-factor authentication</h2>
+            <p className="loginHint">
+              {recoveryMode
+                ? 'Enter one of your saved recovery codes.'
+                : 'Enter the code from your authenticator app.'}
+            </p>
             <label>
               {recoveryMode ? 'Recovery code' : 'Authenticator code'}
               <input
@@ -159,7 +164,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
             <button type="button" disabled={submitting} onClick={toggleRecoveryMode}>
               {recoveryMode ? 'Use an authenticator code' : 'Use a recovery code'}
             </button>
-            <button type="button" disabled={submitting} onClick={backToLogin}>
+            <button className="loginBackButton" type="button" disabled={submitting} onClick={backToLogin}>
               Back to login
             </button>
           </>

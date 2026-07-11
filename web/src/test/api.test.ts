@@ -264,9 +264,19 @@ describe('二因素管理 API', () => {
     ],
     ['enable 不足十码', () => enableTwoFactor('123456'), { recovery_codes: Array(9).fill('CODE') }],
     [
+      'enable trim 后重复码',
+      () => enableTwoFactor('123456'),
+      { recovery_codes: ['DUPLICATE', ' DUPLICATE ', ...Array.from({ length: 8 }, (_, index) => `CODE-${index}`)] },
+    ],
+    [
       '轮换包含空码',
       () => regenerateRecoveryCodes('secret', '123456'),
       { recovery_codes: [...Array(9).fill('CODE'), ''] },
+    ],
+    [
+      '轮换部分重复码',
+      () => regenerateRecoveryCodes('secret', '123456'),
+      { recovery_codes: [...Array.from({ length: 9 }, (_, index) => `CODE-${index}`), 'CODE-4'] },
     ],
     ['disable 未确认', () => disableTwoFactor('secret'), { ok: false }],
   ])('拒绝异常成功响应：%s', async (_name, call, body) => {
@@ -283,5 +293,25 @@ describe('二因素管理 API', () => {
       vi.fn().mockResolvedValue(jsonResponse(201, { enabled: false, recovery_codes_remaining: 0 }))
     );
     await expect(getTwoFactorStatus()).rejects.toMatchObject({ status: 201, code: 'invalid_response' });
+  });
+
+  it.each([
+    ['非 TOTP URI', 'otpauth://hotp/example?secret=MANUALKEY', '2026-07-11T15:00:00Z'],
+    ['缺少 secret', 'otpauth://totp/example?issuer=Vibe', '2026-07-11T15:00:00Z'],
+    ['空 secret', 'otpauth://totp/example?secret=', '2026-07-11T15:00:00Z'],
+    ['宽松日期文本', 'otpauth://totp/example?secret=MANUALKEY', 'July 11, 2026 15:00:00 UTC'],
+    ['无效日历日期', 'otpauth://totp/example?secret=MANUALKEY', '2026-02-30T00:00:00Z'],
+  ])('拒绝不严格的 setup 响应：%s', async (_name, otpauthURI, expiresAt) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          manual_key: 'MANUALKEY',
+          otpauth_uri: otpauthURI,
+          expires_at: expiresAt,
+        })
+      )
+    );
+    await expect(startTwoFactorSetup('secret')).rejects.toMatchObject({ code: 'invalid_response' });
   });
 });

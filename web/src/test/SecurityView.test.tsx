@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   Reflect.deleteProperty(navigator, 'clipboard');
   Reflect.deleteProperty(URL, 'createObjectURL');
   Reflect.deleteProperty(URL, 'revokeObjectURL');
@@ -49,7 +50,7 @@ async function reachRecoveryCodes() {
     expiresAt: '2026-07-11T15:00:00Z',
   });
   mockedAPI.enableTwoFactor.mockResolvedValue(recoveryCodes);
-  render(<SecurityView />);
+  const view = render(<SecurityView />);
   await screen.findByText('Two-factor authentication is disabled.');
   await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
   await userEvent.type(screen.getByLabelText('Current password'), 'secret');
@@ -57,6 +58,7 @@ async function reachRecoveryCodes() {
   await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
   await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
   await screen.findByRole('heading', { name: 'Save your recovery codes' });
+  return view;
 }
 
 function expectOneTimeRecoveryCodeWarning() {
@@ -141,9 +143,14 @@ describe('SecurityView', () => {
   });
 
   it('展示未认证和管理API错误并停留在当前步骤', async () => {
-    mockedAPI.getTwoFactorStatus.mockRejectedValueOnce(new api.APIError(401, 'unauthorized', 'login required'));
+    mockedAPI.getTwoFactorStatus
+      .mockRejectedValueOnce(new api.APIError(401, 'unauthorized', 'login required'))
+      .mockResolvedValueOnce({ enabled: false, recoveryCodesRemaining: 0 });
     const first = render(<SecurityView />);
     expect(await screen.findByRole('alert')).toHaveTextContent('login required');
+    await userEvent.click(screen.getByRole('button', { name: 'Retry loading status' }));
+    expect(await screen.findByText('Two-factor authentication is disabled.')).toBeInTheDocument();
+    expect(mockedAPI.getTwoFactorStatus).toHaveBeenCalledTimes(2);
     first.unmount();
 
     mockedAPI.getTwoFactorStatus.mockResolvedValue({ enabled: false, recoveryCodesRemaining: 0 });
@@ -156,7 +163,11 @@ describe('SecurityView', () => {
     await userEvent.type(screen.getByLabelText('Current password'), 'secret');
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('two factor state changed');
-    expect(screen.getByLabelText('Current password')).toHaveValue('secret');
+    const conflictedPassword = screen.getByLabelText('Current password');
+    expect(conflictedPassword).toHaveValue('secret');
+    expect(conflictedPassword).toHaveAttribute('aria-invalid', 'true');
+    expect(conflictedPassword).toHaveAttribute('aria-describedby', 'security-error');
+    expect(screen.getByRole('alert')).toHaveAttribute('id', 'security-error');
     second.unmount();
 
     mockedAPI.startTwoFactorSetup.mockResolvedValue({
@@ -175,8 +186,67 @@ describe('SecurityView', () => {
     await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
     await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('two factor setup expired');
-    expect(screen.getByText('MANUALKEY')).toBeInTheDocument();
-    expect(screen.getByLabelText('Authenticator code')).toHaveValue('123456');
+    expect(screen.queryByText('MANUALKEY')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Authenticator code')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Current password')).toHaveValue('');
+  });
+
+  it('密码和TOTP字段required且空值或纯空白时禁用提交', async () => {
+    mockedAPI.startTwoFactorSetup.mockResolvedValue({
+      manualKey: 'MANUALKEY',
+      otpauthURI: 'otpauth://totp/example?secret=MANUALKEY',
+      expiresAt: '2026-07-11T15:00:00Z',
+    });
+    const disabledView = render(<SecurityView />);
+    await screen.findByText('Two-factor authentication is disabled.');
+    await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
+    const setupPassword = screen.getByLabelText('Current password');
+    const continueButton = screen.getByRole('button', { name: 'Continue' });
+    expect(setupPassword).toBeRequired();
+    expect(continueButton).toBeDisabled();
+    fireEvent.submit(continueButton.closest('form')!);
+    expect(mockedAPI.startTwoFactorSetup).not.toHaveBeenCalled();
+    await userEvent.type(setupPassword, '   ');
+    expect(continueButton).toBeDisabled();
+    await userEvent.clear(setupPassword);
+    await userEvent.type(setupPassword, 'secret');
+    expect(continueButton).toBeEnabled();
+    await userEvent.click(continueButton);
+
+    const setupCode = await screen.findByLabelText('Authenticator code');
+    const enableButton = screen.getByRole('button', { name: 'Enable two-factor authentication' });
+    expect(setupCode).toBeRequired();
+    expect(enableButton).toBeDisabled();
+    fireEvent.submit(enableButton.closest('form')!);
+    expect(mockedAPI.enableTwoFactor).not.toHaveBeenCalled();
+    await userEvent.type(setupCode, '   ');
+    expect(enableButton).toBeDisabled();
+    disabledView.unmount();
+
+    mockedAPI.getTwoFactorStatus.mockResolvedValue({ enabled: true, recoveryCodesRemaining: 5 });
+    render(<SecurityView />);
+    await screen.findByText('Two-factor authentication is enabled.');
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate recovery codes' }));
+    const regenerationPassword = screen.getByLabelText('Current password');
+    const regenerationCode = screen.getByLabelText('Authenticator code');
+    const regenerateButton = screen.getByRole('button', { name: 'Regenerate recovery codes' });
+    expect(regenerationPassword).toBeRequired();
+    expect(regenerationCode).toBeRequired();
+    expect(regenerateButton).toBeDisabled();
+    fireEvent.submit(regenerateButton.closest('form')!);
+    expect(mockedAPI.regenerateRecoveryCodes).not.toHaveBeenCalled();
+    await userEvent.type(regenerationPassword, 'secret');
+    await userEvent.type(regenerationCode, '123456');
+    expect(regenerateButton).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Disable two-factor authentication' }));
+    const disablePassword = screen.getByLabelText('Current password');
+    const disableButton = screen.getByRole('button', { name: 'Confirm disable two-factor authentication' });
+    expect(disablePassword).toBeRequired();
+    expect(disableButton).toBeDisabled();
+    fireEvent.submit(disableButton.closest('form')!);
+    expect(mockedAPI.disableTwoFactor).not.toHaveBeenCalled();
   });
 
   it('取消启用各步骤会清空密码、验证码和setup', async () => {
@@ -231,38 +301,92 @@ describe('SecurityView', () => {
     const revokeObjectURL = vi.fn();
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL });
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      expect(document.body.contains(this)).toBe(true);
+    });
     await reachRecoveryCodes();
 
     await userEvent.click(screen.getByRole('button', { name: 'Copy recovery codes' }));
     expect(writeText).toHaveBeenCalledWith(recoveryCodes.join('\n'));
-    await userEvent.click(screen.getByRole('button', { name: 'Download recovery codes' }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Download recovery codes' }));
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
     expect(click).toHaveBeenCalledOnce();
-    expect(click.mock.instances[0]).toMatchObject({ download: 'vibe-terminal-recovery-codes.txt' });
+    const downloadLink = click.mock.instances[0] as HTMLAnchorElement;
+    expect(downloadLink).toMatchObject({ download: 'vibe-terminal-recovery-codes.txt' });
+    expect(document.body.contains(downloadLink)).toBe(false);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.runOnlyPendingTimers();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:recovery-codes');
   });
 
   it('复制或下载失败会提示且不会清除恢复码，Done才清除', async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error('clipboard denied'));
+    const writeText = vi.fn().mockRejectedValue(new Error(`clipboard denied ${recoveryCodes[0]}`));
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
       value: vi.fn(() => {
-        throw new Error('download blocked');
+        throw new Error(`download blocked ${recoveryCodes[0]}`);
       }),
     });
     await reachRecoveryCodes();
 
     await userEvent.click(screen.getByRole('button', { name: 'Copy recovery codes' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('clipboard denied');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to copy recovery codes.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent(recoveryCodes[0]);
     expect(screen.getByText(recoveryCodes[0])).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Download recovery codes' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('download blocked');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to download recovery codes.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent(recoveryCodes[0]);
     expect(screen.getByText(recoveryCodes[0])).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(screen.queryByText(recoveryCodes[0])).not.toBeInTheDocument();
+  });
+
+  it('复制期间使用独立busy状态禁用恢复码操作并阻止重复copy', async () => {
+    const pendingCopy = deferred<void>();
+    const writeText = vi.fn().mockReturnValue(pendingCopy.promise);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    await reachRecoveryCodes();
+
+    const copy = screen.getByRole('button', { name: 'Copy recovery codes' });
+    const download = screen.getByRole('button', { name: 'Download recovery codes' });
+    const done = screen.getByRole('button', { name: 'Done' });
+    await userEvent.click(copy);
+    expect(copy).toBeDisabled();
+    expect(download).toBeDisabled();
+    expect(done).toBeDisabled();
+    await userEvent.click(copy);
+    expect(writeText).toHaveBeenCalledTimes(1);
+
+    pendingCopy.resolve(undefined);
+    await waitFor(() => expect(copy).toBeEnabled());
+    expect(download).toBeEnabled();
+    expect(done).toBeEnabled();
+  });
+
+  it('卸载后的旧copy失败不会污染新的恢复码页面', async () => {
+    const oldCopy = deferred<void>();
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockReturnValue(oldCopy.promise) },
+    });
+    const oldView = await reachRecoveryCodes();
+    await userEvent.click(screen.getByRole('button', { name: 'Copy recovery codes' }));
+    oldView.unmount();
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    render(<SecurityView />);
+    await screen.findByText('Two-factor authentication is disabled.');
+    await act(async () => {
+      oldCopy.reject(new Error('stale clipboard failure'));
+      await oldCopy.promise.catch(() => undefined);
+    });
+    expect(screen.queryByText('stale clipboard failure')).not.toBeInTheDocument();
   });
 
   it('管理请求未决时禁用表单、Cancel和重复提交', async () => {

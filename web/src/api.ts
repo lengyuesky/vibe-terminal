@@ -194,7 +194,48 @@ function parseRecoveryCodes(value: unknown, status: number): string[] {
   ) {
     throw new APIError(status, 'invalid_response', 'server returned invalid recovery codes');
   }
-  return body.recovery_codes.map((code) => code.trim());
+  const codes = body.recovery_codes.map((code) => code.trim());
+  if (new Set(codes).size !== 10) {
+    throw new APIError(status, 'invalid_response', 'server returned duplicate recovery codes');
+  }
+  return codes;
+}
+
+function isValidTOTPURI(value: string): boolean {
+  try {
+    const uri = new URL(value);
+    return uri.protocol === 'otpauth:' && uri.hostname === 'totp' && Boolean(uri.searchParams.get('secret')?.trim());
+  } catch {
+    return false;
+  }
+}
+
+function isValidRFC3339(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (zone !== 'Z') {
+    const offsetHour = Number(zone.slice(1, 3));
+    const offsetMinute = Number(zone.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
+  const calendar = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    Number.isFinite(Date.parse(value)) &&
+    calendar.getUTCFullYear() === year &&
+    calendar.getUTCMonth() === month - 1 &&
+    calendar.getUTCDate() === day &&
+    calendar.getUTCHours() === hour &&
+    calendar.getUTCMinutes() === minute &&
+    calendar.getUTCSeconds() === second
+  );
 }
 
 export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
@@ -227,10 +268,9 @@ export async function startTwoFactorSetup(password: string): Promise<TwoFactorSe
     typeof body.manual_key !== 'string' ||
     !body.manual_key.trim() ||
     typeof body.otpauth_uri !== 'string' ||
-    !body.otpauth_uri.startsWith('otpauth://') ||
+    !isValidTOTPURI(body.otpauth_uri) ||
     typeof body.expires_at !== 'string' ||
-    !body.expires_at ||
-    !Number.isFinite(Date.parse(body.expires_at))
+    !isValidRFC3339(body.expires_at)
   ) {
     throw new APIError(response.status, 'invalid_response', 'server returned an invalid two-factor setup');
   }

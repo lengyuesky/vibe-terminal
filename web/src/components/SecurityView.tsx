@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
+  APIError,
   disableTwoFactor,
   enableTwoFactor,
   getTwoFactorStatus,
@@ -27,9 +28,12 @@ export function SecurityView() {
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [copying, setCopying] = useState(false);
   const mountedRef = useRef(false);
   const submittingRef = useRef(false);
   const requestGenerationRef = useRef(0);
+  const copyingRef = useRef(false);
+  const copyGenerationRef = useRef(0);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const passwordInputRef = useRef<HTMLInputElement>(null);
   const codeInputRef = useRef<HTMLInputElement>(null);
@@ -37,23 +41,14 @@ export function SecurityView() {
 
   useEffect(() => {
     mountedRef.current = true;
-    submittingRef.current = true;
-    const generation = ++requestGenerationRef.current;
-    setLoading(true);
-    void getTwoFactorStatus()
-      .then((result) => {
-        if (isCurrentRequest(generation)) setStatus(result);
-      })
-      .catch((caught) => {
-        if (isCurrentRequest(generation)) {
-          setError(caught instanceof Error ? caught.message : 'Failed to load two-factor status.');
-        }
-      })
-      .finally(() => finishRequest(generation));
+    submittingRef.current = false;
+    void loadStatus();
     return () => {
       mountedRef.current = false;
       submittingRef.current = false;
       requestGenerationRef.current += 1;
+      copyingRef.current = false;
+      copyGenerationRef.current += 1;
     };
   }, []);
 
@@ -84,7 +79,33 @@ export function SecurityView() {
     setLoading(false);
   }
 
+  async function loadStatus() {
+    const generation = beginRequest();
+    if (generation === null) return;
+    try {
+      const result = await getTwoFactorStatus();
+      if (isCurrentRequest(generation)) setStatus(result);
+    } catch (caught) {
+      if (isCurrentRequest(generation)) {
+        setError(caught instanceof Error ? caught.message : 'Failed to load two-factor status.');
+      }
+    } finally {
+      finishRequest(generation);
+    }
+  }
+
+  function isCurrentCopy(generation: number) {
+    return mountedRef.current && generation === copyGenerationRef.current;
+  }
+
+  function invalidateCopy() {
+    copyGenerationRef.current += 1;
+    copyingRef.current = false;
+    if (mountedRef.current) setCopying(false);
+  }
+
   function clearSensitiveState() {
+    invalidateCopy();
     setPassword('');
     setCode('');
     setSetup(null);
@@ -107,6 +128,7 @@ export function SecurityView() {
 
   async function submitSetup(event: FormEvent) {
     event.preventDefault();
+    if (!password.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
     try {
@@ -126,6 +148,7 @@ export function SecurityView() {
 
   async function submitEnable(event: FormEvent) {
     event.preventDefault();
+    if (!code.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
     try {
@@ -139,6 +162,10 @@ export function SecurityView() {
       setStep('recovery_codes');
     } catch (caught) {
       if (isCurrentRequest(generation)) {
+        if (caught instanceof APIError && caught.code === 'two_factor_setup_expired') {
+          clearSensitiveState();
+          setStep('enable_password');
+        }
         setError(caught instanceof Error ? caught.message : 'Failed to enable two-factor authentication.');
       }
     } finally {
@@ -148,6 +175,7 @@ export function SecurityView() {
 
   async function submitRegenerate(event: FormEvent) {
     event.preventDefault();
+    if (!password.trim() || !code.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
     try {
@@ -169,6 +197,7 @@ export function SecurityView() {
 
   async function submitDisable(event: FormEvent) {
     event.preventDefault();
+    if (!password.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
     try {
@@ -194,29 +223,46 @@ export function SecurityView() {
   }
 
   async function copyRecoveryCodes() {
+    if (copyingRef.current) return;
+    copyingRef.current = true;
+    const generation = ++copyGenerationRef.current;
+    setCopying(true);
     setError('');
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard is unavailable.');
       await navigator.clipboard.writeText(recoveryCodes.join('\n'));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to copy recovery codes.');
+      if (isCurrentCopy(generation)) {
+        setError('Failed to copy recovery codes.');
+      }
+    } finally {
+      if (isCurrentCopy(generation)) {
+        copyingRef.current = false;
+        setCopying(false);
+      }
     }
   }
 
   function downloadRecoveryCodes() {
     setError('');
     let objectURL = '';
+    let link: HTMLAnchorElement | null = null;
     try {
       const blob = new Blob([`${recoveryCodes.join('\n')}\n`], { type: 'text/plain;charset=utf-8' });
       objectURL = URL.createObjectURL(blob);
-      const link = document.createElement('a');
+      link = document.createElement('a');
       link.href = objectURL;
       link.download = 'vibe-terminal-recovery-codes.txt';
+      document.body.append(link);
       link.click();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to download recovery codes.');
+    } catch {
+      setError('Failed to download recovery codes.');
     } finally {
-      if (objectURL) URL.revokeObjectURL(objectURL);
+      link?.remove();
+      if (objectURL) {
+        const urlToRevoke = objectURL;
+        setTimeout(() => URL.revokeObjectURL(urlToRevoke), 0);
+      }
     }
   }
 
@@ -226,9 +272,14 @@ export function SecurityView() {
         Two-factor security
       </h1>
       {error && (
-        <p role="alert" className="error">
+        <p id="security-error" role="alert" className="error">
           {error}
         </p>
+      )}
+      {step === 'overview' && !status && error && (
+        <button type="button" disabled={loading} onClick={() => void loadStatus()}>
+          Retry loading status
+        </button>
       )}
 
       {step === 'overview' && status && (
@@ -259,15 +310,18 @@ export function SecurityView() {
           <label>
             Current password
             <input
+              aria-describedby={error ? 'security-error' : undefined}
+              aria-invalid={error ? true : undefined}
               autoComplete="current-password"
               disabled={loading}
               ref={passwordInputRef}
+              required
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading}>Continue</button>
+          <button type="submit" disabled={loading || !password.trim()}>Continue</button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
             Cancel
           </button>
@@ -283,15 +337,18 @@ export function SecurityView() {
           <label>
             Authenticator code
             <input
+              aria-describedby={error ? 'security-error' : undefined}
+              aria-invalid={error ? true : undefined}
               autoComplete="one-time-code"
               disabled={loading}
               inputMode="numeric"
               ref={codeInputRef}
+              required
               value={code}
               onChange={(event) => setCode(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading}>Enable two-factor authentication</button>
+          <button type="submit" disabled={loading || !code.trim()}>Enable two-factor authentication</button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
             Cancel
           </button>
@@ -309,13 +366,13 @@ export function SecurityView() {
               <li key={`${index}:${recoveryCode}`}>{recoveryCode}</li>
             ))}
           </ul>
-          <button type="button" onClick={() => void copyRecoveryCodes()}>
+          <button type="button" disabled={copying} onClick={() => void copyRecoveryCodes()}>
             Copy recovery codes
           </button>
-          <button type="button" onClick={downloadRecoveryCodes}>
+          <button type="button" disabled={copying} onClick={downloadRecoveryCodes}>
             Download recovery codes
           </button>
-          <button type="button" onClick={finishRecoveryCodes}>
+          <button type="button" disabled={copying} onClick={finishRecoveryCodes}>
             Done
           </button>
         </div>
@@ -327,9 +384,12 @@ export function SecurityView() {
           <label>
             Current password
             <input
+              aria-describedby={error ? 'security-error' : undefined}
+              aria-invalid={error ? true : undefined}
               autoComplete="current-password"
               disabled={loading}
               ref={passwordInputRef}
+              required
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
@@ -338,14 +398,19 @@ export function SecurityView() {
           <label>
             Authenticator code
             <input
+              aria-describedby={error ? 'security-error' : undefined}
+              aria-invalid={error ? true : undefined}
               autoComplete="one-time-code"
               disabled={loading}
               inputMode="numeric"
+              required
               value={code}
               onChange={(event) => setCode(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading}>Regenerate recovery codes</button>
+          <button type="submit" disabled={loading || !password.trim() || !code.trim()}>
+            Regenerate recovery codes
+          </button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
             Cancel
           </button>
@@ -359,15 +424,20 @@ export function SecurityView() {
           <label>
             Current password
             <input
+              aria-describedby={error ? 'security-error' : undefined}
+              aria-invalid={error ? true : undefined}
               autoComplete="current-password"
               disabled={loading}
               ref={passwordInputRef}
+              required
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading}>Confirm disable two-factor authentication</button>
+          <button type="submit" disabled={loading || !password.trim()}>
+            Confirm disable two-factor authentication
+          </button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
             Cancel
           </button>

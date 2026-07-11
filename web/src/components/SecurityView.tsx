@@ -303,6 +303,7 @@ export function SecurityView() {
           <h2 ref={recoveryTitleRef} tabIndex={-1}>
             Save your recovery codes
           </h2>
+          <p role="note">These recovery codes are shown only once. Store them safely before continuing.</p>
           <ul>
             {recoveryCodes.map((recoveryCode, index) => (
               <li key={`${index}:${recoveryCode}`}>{recoveryCode}</li>

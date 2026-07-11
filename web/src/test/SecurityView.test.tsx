@@ -59,6 +59,12 @@ async function reachRecoveryCodes() {
   await screen.findByRole('heading', { name: 'Save your recovery codes' });
 }
 
+function expectOneTimeRecoveryCodeWarning() {
+  const warning = screen.getByRole('note');
+  expect(warning).toHaveTextContent(/shown only once/i);
+  expect(warning).toHaveTextContent(/(?:store|save).*(?:safe|secure)/i);
+}
+
 describe('SecurityView', () => {
   it('完成启用流程并在 Done 后彻底移除一次性恢复码', async () => {
     mockedAPI.startTwoFactorSetup.mockResolvedValue({
@@ -85,6 +91,7 @@ describe('SecurityView', () => {
     await waitFor(() => expect(mockedAPI.enableTwoFactor).toHaveBeenCalledWith('123456'));
 
     expect(await screen.findByRole('heading', { name: 'Save your recovery codes' })).toBeInTheDocument();
+    expectOneTimeRecoveryCodeWarning();
     for (const code of recoveryCodes) expect(screen.getByText(code)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
 
@@ -108,6 +115,7 @@ describe('SecurityView', () => {
       expect(mockedAPI.regenerateRecoveryCodes).toHaveBeenCalledWith('secret', '654321')
     );
     expect(await screen.findByRole('heading', { name: 'Save your recovery codes' })).toBeInTheDocument();
+    expectOneTimeRecoveryCodeWarning();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(await screen.findByText('10 recovery codes remaining.')).toBeInTheDocument();
 

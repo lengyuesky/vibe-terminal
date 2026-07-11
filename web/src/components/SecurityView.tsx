@@ -19,7 +19,7 @@ type SecurityStep =
   | 'regenerate'
   | 'disable';
 
-export function SecurityView() {
+export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRecoveryDeliveryLockChange?: (locked: boolean) => void }) {
   const [step, setStep] = useState<SecurityStep>('overview');
   const [status, setStatus] = useState<TwoFactorStatus | null>(null);
   const [password, setPassword] = useState('');
@@ -44,6 +44,7 @@ export function SecurityView() {
     submittingRef.current = false;
     void loadStatus();
     return () => {
+      onRecoveryDeliveryLockChange(false);
       mountedRef.current = false;
       submittingRef.current = false;
       requestGenerationRef.current += 1;
@@ -151,6 +152,7 @@ export function SecurityView() {
     if (!code.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
+    onRecoveryDeliveryLockChange(true);
     try {
       const codes = await enableTwoFactor(code);
       if (!isCurrentRequest(generation)) return;
@@ -162,6 +164,7 @@ export function SecurityView() {
       setStep('recovery_codes');
     } catch (caught) {
       if (isCurrentRequest(generation)) {
+        onRecoveryDeliveryLockChange(false);
         if (caught instanceof APIError && caught.code === 'two_factor_setup_expired') {
           clearSensitiveState();
           setStep('enable_password');
@@ -178,6 +181,7 @@ export function SecurityView() {
     if (!password.trim() || !code.trim()) return;
     const generation = beginRequest();
     if (generation === null) return;
+    onRecoveryDeliveryLockChange(true);
     try {
       const codes = await regenerateRecoveryCodes(password, code);
       if (!isCurrentRequest(generation)) return;
@@ -188,6 +192,7 @@ export function SecurityView() {
       setStep('recovery_codes');
     } catch (caught) {
       if (isCurrentRequest(generation)) {
+        onRecoveryDeliveryLockChange(false);
         setError(caught instanceof Error ? caught.message : 'Failed to regenerate recovery codes.');
       }
     } finally {
@@ -218,6 +223,7 @@ export function SecurityView() {
   function finishRecoveryCodes() {
     if (submittingRef.current) return;
     clearSensitiveState();
+    onRecoveryDeliveryLockChange(false);
     setError('');
     setStep('overview');
   }

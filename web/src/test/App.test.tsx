@@ -729,6 +729,47 @@ describe('AppView', () => {
     expect(screen.queryByText('USER-A-RECOVERY-0')).not.toBeInTheDocument();
   });
 
+  it('启用请求和恢复码交付期间阻止离开Security，Done后恢复导航', async () => {
+    const recoveryRequest = deferred<string[]>();
+    mockedApi.startTwoFactorSetup.mockResolvedValue({
+      manualKey: 'DELIVERY-SECRET', otpauthURI: 'otpauth://totp/example?secret=DELIVERY-SECRET', expiresAt: '',
+    });
+    mockedApi.enableTwoFactor.mockReturnValue(recoveryRequest.promise);
+    render(<AppView {...loggedInAppViewProps()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Enable two-factor authentication' }));
+    await userEvent.type(screen.getByLabelText('Current password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
+
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Agent Tokens' })).toBeDisabled();
+    expect(screen.getByText('DELIVERY-SECRET')).toBeInTheDocument();
+    await act(async () => recoveryRequest.resolve(['DELIVERY-CODE']));
+    expect(await screen.findByText('DELIVERY-CODE')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeEnabled();
+  });
+
+  it('轮换恢复码失败后恢复导航且不会卸载pending组件', async () => {
+    const request = deferred<string[]>();
+    mockedApi.getTwoFactorStatus.mockResolvedValue({ enabled: true, recoveryCodesRemaining: 3 });
+    mockedApi.regenerateRecoveryCodes.mockReturnValue(request.promise);
+    render(<AppView {...loggedInAppViewProps()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Regenerate recovery codes' }));
+    await userEvent.type(screen.getByLabelText('Current password'), 'secret');
+    await userEvent.type(screen.getByLabelText('Authenticator code'), '654321');
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate recovery codes' }));
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeDisabled();
+    expect(screen.getByLabelText('Authenticator code')).toBeInTheDocument();
+    await act(async () => request.reject(new Error('rotation failed')));
+    expect(await screen.findByRole('alert')).toHaveTextContent('rotation failed');
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeEnabled();
+  });
+
   it('creates and revokes agent tokens from the management view', async () => {
     const createToken = vi.fn().mockResolvedValue(undefined);
     const revokeToken = vi.fn().mockResolvedValue(undefined);

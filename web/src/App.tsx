@@ -108,7 +108,8 @@ export function useAgentTokenState(user: User | null) {
   return { tokens: current.tokens, createdToken: current.createdToken, loading: current.loading, error: current.error, load, create, revoke, remove };
 }
 
-type SecurityLoader = () => Promise<{ default: ComponentType }>;
+type SecurityViewProps = { onRecoveryDeliveryLockChange?: (locked: boolean) => void };
+type SecurityLoader = () => Promise<{ default: ComponentType<SecurityViewProps> }>;
 const defaultSecurityLoader: SecurityLoader = () =>
   import('./components/SecurityView').then((module) => ({ default: module.SecurityView }));
 
@@ -132,13 +133,13 @@ class SecurityErrorBoundary extends Component<
   }
 }
 
-function SecurityPanel({ loader }: { loader: SecurityLoader }) {
+function SecurityPanel({ loader, onRecoveryDeliveryLockChange }: { loader: SecurityLoader; onRecoveryDeliveryLockChange: (locked: boolean) => void }) {
   const [attempt, setAttempt] = useState(0);
   const LazySecurityView = useMemo(() => lazy(loader), [loader, attempt]);
   return (
     <SecurityErrorBoundary key={attempt} onRetry={() => setAttempt((value) => value + 1)}>
       <Suspense fallback={<p className="securityLoading" role="status" aria-label="Loading security settings">Loading security settings...</p>}>
-        <LazySecurityView />
+        <LazySecurityView onRecoveryDeliveryLockChange={onRecoveryDeliveryLockChange} />
       </Suspense>
     </SecurityErrorBoundary>
   );
@@ -322,6 +323,7 @@ function AuthenticatedAppView({
   const [localSessions, setLocalSessions] = useState<Session[]>(initialSessions);
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
   const [filesDevice, setFilesDevice] = useState<Device | null>(null);
+  const [securityDeliveryLocked, setSecurityDeliveryLocked] = useState(false);
 
   useEffect(() => {
     setLocalDevices(devices);
@@ -364,6 +366,7 @@ function AuthenticatedAppView({
         <nav className="sideNav" aria-label="Primary">
           <button
             type="button"
+            disabled={securityDeliveryLocked}
             aria-current={viewMode === 'terminals' ? 'page' : undefined}
             className={viewMode === 'terminals' ? 'active' : ''}
             onClick={() => setViewMode('terminals')}
@@ -373,6 +376,7 @@ function AuthenticatedAppView({
           </button>
           <button
             type="button"
+            disabled={securityDeliveryLocked}
             aria-current={viewMode === 'agentTokens' ? 'page' : undefined}
             className={viewMode === 'agentTokens' ? 'active' : ''}
             onClick={() => setViewMode('agentTokens')}
@@ -420,7 +424,7 @@ function AuthenticatedAppView({
       </div>
       {viewMode === 'security' && (
         <main className="securityPage">
-          <SecurityPanel loader={securityLoader} />
+          <SecurityPanel loader={securityLoader} onRecoveryDeliveryLockChange={setSecurityDeliveryLocked} />
         </main>
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}

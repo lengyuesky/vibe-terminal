@@ -1,5 +1,6 @@
 import { KeyRound, Monitor, ShieldCheck, Terminal } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentType, ErrorInfo, ReactNode } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
@@ -11,9 +12,111 @@ import { TerminalTabs } from './components/TerminalTabs';
 type SessionsByDevice = Record<string, Session[]>;
 type ViewMode = 'terminals' | 'agentTokens' | 'security';
 
-const SecurityView = lazy(() =>
-  import('./components/SecurityView').then((module) => ({ default: module.SecurityView }))
-);
+type AgentTokenState = {
+  userId: string | null;
+  tokens: AgentToken[];
+  createdToken: CreatedAgentToken | null;
+  loading: boolean;
+  error: string | null;
+};
+
+export function useAgentTokenState(user: User | null) {
+  const userId = user?.id ?? null;
+  const generationRef = useRef(0);
+  const userIdRef = useRef(userId);
+  const mountedRef = useRef(true);
+  const [state, setState] = useState<AgentTokenState>({ userId, tokens: [], createdToken: null, loading: false, error: null });
+  if (userIdRef.current !== userId) {
+    userIdRef.current = userId;
+    generationRef.current += 1;
+  }
+  useEffect(() => () => {
+    mountedRef.current = false;
+    generationRef.current += 1;
+  }, []);
+  const current = state.userId === userId ? state : { userId, tokens: [], createdToken: null, loading: false, error: null };
+  const begin = () => ({ generation: generationRef.current, userId });
+  const valid = (request: { generation: number; userId: string | null }) =>
+    mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current;
+
+  const load = useCallback(async () => {
+    const request = begin();
+    if (!request.userId) return;
+    setState({ userId: request.userId, tokens: current.tokens, createdToken: current.createdToken, loading: true, error: null });
+    try {
+      const tokens = await api.listAgentTokens();
+      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, tokens }));
+    } catch {
+      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, error: 'Failed to load agent tokens.' }));
+    } finally {
+      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, loading: false }));
+    }
+  }, [userId, current.tokens, current.createdToken]);
+
+  async function mutate<T>(action: () => Promise<T>, failure: string, apply: (value: T) => void) {
+    const request = begin();
+    if (!request.userId) return;
+    setState((value) => ({ ...value, userId: request.userId, loading: true, error: null }));
+    try {
+      const result = await action();
+      if (valid(request)) apply(result);
+    } catch (error) {
+      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, error: failure }));
+      throw error;
+    } finally {
+      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, loading: false }));
+    }
+  }
+  const create = (name: string, ttlHours: number) => mutate(
+    () => api.createAgentToken(name, ttlHours), 'Failed to create agent token.', (created) =>
+      setState((value) => ({ ...value, userId, createdToken: created, tokens: [created, ...value.tokens.filter((token) => token.id !== created.id)] }))
+  );
+  const revoke = (id: string) => mutate(
+    () => api.revokeAgentToken(id), 'Failed to revoke agent token.', (revoked) =>
+      setState((value) => ({ ...value, userId, tokens: value.tokens.map((token) => token.id === id ? revoked : token) }))
+  );
+  const remove = (id: string) => mutate(
+    () => api.deleteAgentToken(id), 'Failed to delete agent token.', () =>
+      setState((value) => ({ ...value, userId, tokens: value.tokens.filter((token) => token.id !== id), createdToken: value.createdToken?.id === id ? null : value.createdToken }))
+  );
+  return { tokens: current.tokens, createdToken: current.createdToken, loading: current.loading, error: current.error, load, create, revoke, remove };
+}
+
+type SecurityLoader = () => Promise<{ default: ComponentType }>;
+const defaultSecurityLoader: SecurityLoader = () =>
+  import('./components/SecurityView').then((module) => ({ default: module.SecurityView }));
+
+class SecurityErrorBoundary extends Component<
+  { children: ReactNode; onRetry: () => void },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(_error: Error, _info: ErrorInfo) {}
+  render() {
+    if (this.state.failed) {
+      return (
+        <section className="securityLoading" role="alert">
+          <p>Security settings failed to load.</p>
+          <button type="button" onClick={this.props.onRetry}>Retry loading security settings</button>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function SecurityPanel({ loader }: { loader: SecurityLoader }) {
+  const [attempt, setAttempt] = useState(0);
+  const LazySecurityView = useMemo(() => lazy(loader), [loader, attempt]);
+  return (
+    <SecurityErrorBoundary key={attempt} onRetry={() => setAttempt((value) => value + 1)}>
+      <Suspense fallback={<p className="securityLoading" role="status" aria-label="Loading security settings">Loading security settings...</p>}>
+        <LazySecurityView />
+      </Suspense>
+    </SecurityErrorBoundary>
+  );
+}
 
 function enrichSessionDevice(session: Session, deviceId: string, device?: Device): Session {
   return {
@@ -28,10 +131,7 @@ export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [sessions, setSessions] = useState<SessionsByDevice>({});
-  const [agentTokens, setAgentTokens] = useState<AgentToken[]>([]);
-  const [createdAgentToken, setCreatedAgentToken] = useState<CreatedAgentToken | null>(null);
-  const [tokenLoading, setTokenLoading] = useState(false);
-  const [tokenError, setTokenError] = useState<string | null>(null);
+  const tokenState = useAgentTokenState(user);
   const mountedRef = useRef(true);
   const authGenerationRef = useRef(0);
 
@@ -56,9 +156,6 @@ export function App() {
     if (!user) {
       setDevices([]);
       setSessions({});
-      setAgentTokens([]);
-      setCreatedAgentToken(null);
-      setTokenError(null);
       return;
     }
     let cancelled = false;
@@ -118,53 +215,6 @@ export function App() {
     return updated;
   }
 
-  const loadAgentTokens = useCallback(async () => {
-    setTokenLoading(true);
-    setTokenError(null);
-    try {
-      setAgentTokens(await api.listAgentTokens());
-    } catch {
-      setTokenError('Failed to load agent tokens.');
-    } finally {
-      setTokenLoading(false);
-    }
-  }, []);
-
-  async function handleCreateAgentToken(name: string, ttlHours: number) {
-    setTokenError(null);
-    try {
-      const created = await api.createAgentToken(name, ttlHours);
-      setCreatedAgentToken(created);
-      setAgentTokens((current) => [created, ...current.filter((token) => token.id !== created.id)]);
-    } catch (error) {
-      setTokenError('Failed to create agent token.');
-      throw error;
-    }
-  }
-
-  async function handleRevokeAgentToken(id: string) {
-    setTokenError(null);
-    try {
-      const revoked = await api.revokeAgentToken(id);
-      setAgentTokens((current) => current.map((token) => (token.id === id ? revoked : token)));
-    } catch (error) {
-      setTokenError('Failed to revoke agent token.');
-      throw error;
-    }
-  }
-
-  async function handleDeleteAgentToken(id: string) {
-    setTokenError(null);
-    try {
-      await api.deleteAgentToken(id);
-      setAgentTokens((current) => current.filter((token) => token.id !== id));
-      setCreatedAgentToken((current) => (current?.id === id ? null : current));
-    } catch (error) {
-      setTokenError('Failed to delete agent token.');
-      throw error;
-    }
-  }
-
   return (
     <AppView
       user={user}
@@ -176,14 +226,14 @@ export function App() {
       onCreateSession={handleCreateSession}
       onRenameDevice={handleRenameDevice}
       onRenameSession={handleRenameSession}
-      agentTokens={agentTokens}
-      createdAgentToken={createdAgentToken}
-      tokenLoading={tokenLoading}
-      tokenError={tokenError}
-      onCreateAgentToken={handleCreateAgentToken}
-      onRevokeAgentToken={handleRevokeAgentToken}
-      onDeleteAgentToken={handleDeleteAgentToken}
-      onRefreshAgentTokens={loadAgentTokens}
+      agentTokens={tokenState.tokens}
+      createdAgentToken={tokenState.createdToken}
+      tokenLoading={tokenState.loading}
+      tokenError={tokenState.error}
+      onCreateAgentToken={tokenState.create}
+      onRevokeAgentToken={tokenState.revoke}
+      onDeleteAgentToken={tokenState.remove}
+      onRefreshAgentTokens={tokenState.load}
     />
   );
 }
@@ -206,6 +256,7 @@ type AppViewProps = {
   onRevokeAgentToken: (id: string) => Promise<void>;
   onDeleteAgentToken?: (id: string) => Promise<void>;
   onRefreshAgentTokens: () => Promise<void>;
+  securityLoader?: SecurityLoader;
 };
 
 export function AppView(props: AppViewProps) {
@@ -230,6 +281,7 @@ function AuthenticatedAppView({
   onRevokeAgentToken,
   onDeleteAgentToken = async () => {},
   onRefreshAgentTokens,
+  securityLoader = defaultSecurityLoader,
 }: Omit<AppViewProps, 'user'> & { user: User }) {
   const devicesById = useMemo(() => new Map(devices.map((device) => [device.id, device])), [devices]);
   const initialSessions = useMemo(
@@ -342,15 +394,7 @@ function AuthenticatedAppView({
       </div>
       {viewMode === 'security' && (
         <main className="securityPage">
-          <Suspense
-            fallback={(
-              <p className="securityLoading" role="status" aria-label="Loading security settings">
-                Loading security settings...
-              </p>
-            )}
-          >
-            <SecurityView />
-          </Suspense>
+          <SecurityPanel loader={securityLoader} />
         </main>
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}

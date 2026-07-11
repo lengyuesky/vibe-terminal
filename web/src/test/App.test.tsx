@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { App, AppView } from '../App';
+import { App, AppView, useAgentTokenState } from '../App';
 import * as api from '../api';
 
 vi.mock('../components/SecurityView', async (importOriginal) => {
@@ -79,6 +79,72 @@ function loggedInAppViewProps(
     ...overrides,
   };
 }
+
+function TokenStateHarness({ user }: { user: api.User | null }) {
+  const state = useAgentTokenState(user);
+  return (
+    <div>
+      <span>{state.loading ? 'loading' : 'idle'}</span>
+      <span>{state.error ?? ''}</span>
+      {state.tokens.map((token) => <span key={token.id}>{token.name}</span>)}
+      {state.createdToken && <span>{state.createdToken.token}</span>}
+      <button onClick={() => void state.load()}>list</button>
+      <button onClick={() => void state.create('agent-a', 24).catch(() => undefined)}>create</button>
+      <button onClick={() => void state.revoke('token-a').catch(() => undefined)}>revoke</button>
+      <button onClick={() => void state.remove('token-a').catch(() => undefined)}>delete</button>
+    </div>
+  );
+}
+
+describe('useAgentTokenState', () => {
+  it.each(['list', 'create', 'revoke', 'delete'] as const)(
+    '用户切换后忽略用户A延迟的 %s 成功和失败结果',
+    async (operation) => {
+      const request = deferred<never>();
+      const apiMethod = {
+        list: mockedApi.listAgentTokens,
+        create: mockedApi.createAgentToken,
+        revoke: mockedApi.revokeAgentToken,
+        delete: mockedApi.deleteAgentToken,
+      }[operation];
+      apiMethod.mockReturnValue(request.promise);
+      const { rerender } = render(<TokenStateHarness user={{ id: 'user-a', username: 'a' }} />);
+
+      await userEvent.click(screen.getByRole('button', { name: operation }));
+      rerender(<TokenStateHarness user={{ id: 'user-b', username: 'b' }} />);
+      expect(screen.getByText('idle')).toBeInTheDocument();
+
+      await act(async () => request.reject(new Error('用户A请求失败')));
+      expect(screen.queryByText('用户A请求失败')).not.toBeInTheDocument();
+      expect(screen.queryByText('raw-token-a')).not.toBeInTheDocument();
+      expect(screen.getByText('idle')).toBeInTheDocument();
+    }
+  );
+
+  it('用户A延迟创建成功后切换用户也绝不显示明文Token', async () => {
+    const request = deferred<api.CreatedAgentToken>();
+    mockedApi.createAgentToken.mockReturnValue(request.promise);
+    const { rerender } = render(<TokenStateHarness user={{ id: 'user-a', username: 'a' }} />);
+    await userEvent.click(screen.getByRole('button', { name: 'create' }));
+    rerender(<TokenStateHarness user={{ id: 'user-b', username: 'b' }} />);
+
+    await act(async () => request.resolve({
+      id: 'token-a', name: 'agent-a', token: 'raw-token-a', created_at: '', expires_at: '',
+    }));
+    expect(screen.queryByText('raw-token-a')).not.toBeInTheDocument();
+  });
+
+  it.each(['list', 'revoke'] as const)('用户A延迟 %s 成功后不污染用户B', async (operation) => {
+    const request = deferred<api.AgentToken[] | api.AgentToken>();
+    (operation === 'list' ? mockedApi.listAgentTokens : mockedApi.revokeAgentToken).mockReturnValue(request.promise as never);
+    const { rerender } = render(<TokenStateHarness user={{ id: 'user-a', username: 'a' }} />);
+    await userEvent.click(screen.getByRole('button', { name: operation }));
+    rerender(<TokenStateHarness user={{ id: 'user-b', username: 'b' }} />);
+    const token = { id: 'token-a', name: '用户A-Token', created_at: '', expires_at: '' };
+    await act(async () => request.resolve(operation === 'list' ? [token] : token));
+    expect(screen.queryByText('用户A-Token')).not.toBeInTheDocument();
+  });
+});
 
 describe('AppView', () => {
   it('shows login when there is no user', () => {
@@ -431,6 +497,28 @@ describe('AppView', () => {
     expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
     expect(await screen.findByText('Two-factor authentication is disabled.')).toBeInTheDocument();
     expect(mockedApi.getTwoFactorStatus).toHaveBeenCalledOnce();
+  });
+
+  it('Security分包失败时保留终端导航并可重试成功', async () => {
+    let attempts = 0;
+    const securityLoader = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('chunk failed');
+      return { default: () => <h1>重试后的安全设置</h1> };
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const preventChunkError = (event: ErrorEvent) => event.preventDefault();
+    window.addEventListener('error', preventChunkError);
+    render(<AppView {...loggedInAppViewProps({ securityLoader })} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Security settings failed to load.');
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Terminals' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry loading security settings' }));
+    expect(await screen.findByRole('heading', { name: '重试后的安全设置' })).toBeInTheDocument();
+    expect(securityLoader).toHaveBeenCalledTimes(2);
+    window.removeEventListener('error', preventChunkError);
+    errorSpy.mockRestore();
   });
 
   it('切换Security时保留TerminalTabs活动标签', async () => {

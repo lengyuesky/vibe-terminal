@@ -266,6 +266,24 @@ func TestLoginChallengeExpiresAfterFiveMinutes(t *testing.T) {
 	}
 }
 
+func TestVerifyLoginChallengeAtUsesExplicitTime(t *testing.T) {
+	issuedAt := time.Date(2026, time.July, 11, 9, 0, 0, 0, time.UTC)
+	managerNow := issuedAt
+	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return managerNow })
+	if err != nil {
+		t.Fatalf("创建双因素管理器失败：%v", err)
+	}
+	token, err := manager.IssueLoginChallenge("user-1", "configuration-1")
+	if err != nil {
+		t.Fatalf("签发登录挑战失败：%v", err)
+	}
+	managerNow = issuedAt.Add(6 * time.Minute)
+
+	if _, err := manager.VerifyLoginChallengeAt(token, issuedAt.Add(4*time.Minute)); err != nil {
+		t.Fatalf("显式时间仍在有效期内时验证失败：%v", err)
+	}
+}
+
 func TestLoginChallengeExpirationBoundary(t *testing.T) {
 	now := time.Date(2026, time.July, 10, 1, 30, 0, 0, time.UTC)
 	manager, err := NewTwoFactorManager(testTwoFactorRoot, func() time.Time { return now })

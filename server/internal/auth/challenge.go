@@ -140,6 +140,11 @@ func (m *TwoFactorManager) IssueLoginChallenge(userID, configurationID string) (
 
 // VerifyLoginChallenge 验证登录挑战并返回其中的用户和配置信息。
 func (m *TwoFactorManager) VerifyLoginChallenge(token string) (LoginChallenge, error) {
+	return m.VerifyLoginChallengeAt(token, m.now())
+}
+
+// VerifyLoginChallengeAt 使用调用方捕获的时间验证登录挑战。
+func (m *TwoFactorManager) VerifyLoginChallengeAt(token string, now time.Time) (LoginChallenge, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 {
 		return LoginChallenge{}, errors.New("登录挑战必须恰好包含两段")
@@ -169,7 +174,7 @@ func (m *TwoFactorManager) VerifyLoginChallenge(token string) (LoginChallenge, e
 		return LoginChallenge{}, errors.New("登录挑战缺少 JTI、用户或配置标识")
 	}
 
-	now := m.now().UTC()
+	now = now.UTC()
 	issuedAt := time.Unix(payload.IssuedAt, 0).UTC()
 	expiresAt := time.Unix(payload.ExpiresAt, 0).UTC()
 	if now.After(expiresAt) {

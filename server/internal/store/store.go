@@ -12,6 +12,8 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
+var ErrLoginRestartRequired = errors.New("login restart required")
+var ErrInvalidSecondFactor = errors.New("invalid second factor")
 
 const (
 	SessionStarting = "starting"
@@ -55,6 +57,16 @@ type LoginChallenge struct {
 	ExpiresAt       time.Time
 	ConsumedAt      sql.NullTime
 	CreatedAt       time.Time
+}
+
+// ConsumeLoginSecondFactorParams 描述一次必须和登录挑战共同提交的二因素消费。
+type ConsumeLoginSecondFactorParams struct {
+	ChallengeJTI    string
+	UserID          string
+	ConfigurationID string
+	TOTPCounter     sql.NullInt64
+	RecoveryHash    string
+	Now             time.Time
 }
 
 // RecoveryCodeInput 表示待持久化的恢复码标识和哈希。
@@ -191,6 +203,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 			consumed_at datetime,
 			created_at datetime not null
 		)`,
+		`create index if not exists idx_login_challenges_expires_at on login_challenges(expires_at)`,
 		`create table if not exists agent_tokens (
 			id text primary key,
 			name text not null,
@@ -305,11 +318,25 @@ func (db *DB) CreateLoginChallenge(ctx context.Context, challenge LoginChallenge
 	} else {
 		challenge.CreatedAt = challenge.CreatedAt.UTC()
 	}
-	_, err := db.SQL.ExecContext(ctx,
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`delete from login_challenges where jti in (
+			select jti from login_challenges
+			where expires_at < ? order by expires_at, jti limit 100
+		)`, challenge.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`insert into login_challenges (jti, user_id, configuration_id, expires_at, consumed_at, created_at)
 		 values (?, ?, ?, ?, null, ?)`,
-		challenge.JTI, challenge.UserID, challenge.ConfigurationID, challenge.ExpiresAt, challenge.CreatedAt)
-	return err
+		challenge.JTI, challenge.UserID, challenge.ConfigurationID, challenge.ExpiresAt, challenge.CreatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetActiveLoginChallenge 返回未消费且尚未过期的登录挑战。
@@ -338,6 +365,65 @@ func (db *DB) ConsumeLoginChallenge(ctx context.Context, jti, userID, configurat
 		 and consumed_at is null and expires_at >= ?`,
 		now, jti, userID, configurationID, now)
 	return requireAffected(result, err, ErrConflict)
+}
+
+// ConsumeLoginSecondFactor 在同一事务内校验配置并消费挑战和二因素凭据。
+func (db *DB) ConsumeLoginSecondFactor(ctx context.Context, params ConsumeLoginSecondFactorParams) error {
+	hasTOTP := params.TOTPCounter.Valid
+	hasRecovery := params.RecoveryHash != ""
+	if hasTOTP == hasRecovery {
+		return errors.New("必须且只能提供一种二因素凭据")
+	}
+	now := params.Now.UTC()
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	challengeResult, err := tx.ExecContext(ctx,
+		`update login_challenges set consumed_at = ?
+		 where jti = ? and user_id = ? and configuration_id = ?
+		 and consumed_at is null and expires_at >= ?`,
+		now, params.ChallengeJTI, params.UserID, params.ConfigurationID, now)
+	if err := requireAffected(challengeResult, err, ErrLoginRestartRequired); err != nil {
+		return err
+	}
+
+	var currentConfigurationID string
+	err = tx.QueryRowContext(ctx,
+		`select configuration_id from user_two_factor where user_id = ? and enabled_at is not null`,
+		params.UserID).Scan(&currentConfigurationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrLoginRestartRequired
+	}
+	if err != nil {
+		return err
+	}
+	if currentConfigurationID != params.ConfigurationID {
+		return ErrLoginRestartRequired
+	}
+
+	if hasTOTP {
+		result, err := tx.ExecContext(ctx,
+			`update user_two_factor set last_totp_counter = ?, updated_at = ?
+			 where user_id = ? and configuration_id = ? and enabled_at is not null
+			 and (last_totp_counter is null or last_totp_counter < ?)`,
+			params.TOTPCounter.Int64, now, params.UserID, params.ConfigurationID, params.TOTPCounter.Int64)
+		if err := requireAffected(result, err, ErrInvalidSecondFactor); err != nil {
+			return err
+		}
+	} else {
+		result, err := tx.ExecContext(ctx,
+			`update two_factor_recovery_codes set used_at = ?
+			 where user_id = ? and code_hash = ? and used_at is null`,
+			now, params.UserID, params.RecoveryHash)
+		if err := requireAffected(result, err, ErrInvalidSecondFactor); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 // SavePendingTwoFactor 保存尚待用户确认的双因素认证配置。

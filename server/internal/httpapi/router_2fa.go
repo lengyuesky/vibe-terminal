@@ -1,16 +1,23 @@
 package httpapi
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/djy/vibe-terminal/server/internal/auth"
 	"github.com/djy/vibe-terminal/server/internal/store"
 )
 
 var errInvalidSecondFactor = errors.New("invalid second factor")
-var errLoginRestartRequired = errors.New("login restart required")
+
+type verifiedLoginCode struct {
+	method       string
+	totpCounter  sql.NullInt64
+	recoveryHash string
+}
 
 func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) {
 	var body struct {
@@ -24,17 +31,11 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
+	now := r.now()
 
-	challenge, err := r.twoFactor.VerifyLoginChallenge(body.ChallengeToken)
+	challenge, err := r.twoFactor.VerifyLoginChallengeAt(body.ChallengeToken, now)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "login_restart_required", "restart login to continue")
-		return
-	}
-	if _, err := r.store.GetActiveLoginChallenge(req.Context(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, r.now()); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusUnauthorized, "login_restart_required", "restart login to continue")
-		return
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
 	ip := requestIP(req)
@@ -67,34 +68,47 @@ func (r *router) handleLoginTwoFactor(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	method, err := r.verifyLoginCode(req, setting, body.Code)
-	if errors.Is(err, errLoginRestartRequired) {
-		writeError(w, http.StatusUnauthorized, "login_restart_required", "restart login to continue")
-		return
-	}
+	verifiedCode, err := r.verifyLoginCode(setting, body.Code, now)
 	if errors.Is(err, errInvalidSecondFactor) {
-		if blocked, retryAfter := recordLoginFailure(r.twoFactorLimiter, limitKeys); blocked {
-			r.auditLoginRateLimit(req.Context(), user.ID, "second_factor", ip)
-			writeRateLimit(w, retryAfter)
-			return
-		}
-		writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
+		r.writeInvalidSecondFactor(w, req, user.ID, ip, limitKeys)
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
-	if err := r.store.ConsumeLoginChallenge(req.Context(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, r.now()); errors.Is(err, store.ErrConflict) {
+	err = r.store.ConsumeLoginSecondFactor(req.Context(), store.ConsumeLoginSecondFactorParams{
+		ChallengeJTI:    challenge.JTI,
+		UserID:          challenge.UserID,
+		ConfigurationID: challenge.ConfigurationID,
+		TOTPCounter:     verifiedCode.totpCounter,
+		RecoveryHash:    verifiedCode.recoveryHash,
+		Now:             now,
+	})
+	if errors.Is(err, store.ErrLoginRestartRequired) {
 		writeError(w, http.StatusUnauthorized, "login_restart_required", "restart login to continue")
 		return
-	} else if err != nil {
+	}
+	if errors.Is(err, store.ErrInvalidSecondFactor) {
+		r.writeInvalidSecondFactor(w, req, user.ID, ip, limitKeys)
+		return
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
 	}
 
 	clearLoginFailures(r.twoFactorLimiter, limitKeys)
-	r.completeLogin(w, req, user, method)
+	r.completeLogin(w, req, user, verifiedCode.method)
+}
+
+func (r *router) writeInvalidSecondFactor(w http.ResponseWriter, req *http.Request, userID, sourceIP string, limitKeys []string) {
+	if blocked, retryAfter := recordLoginFailure(r.twoFactorLimiter, limitKeys); blocked {
+		r.auditLoginRateLimit(req.Context(), userID, "second_factor", sourceIP)
+		writeRateLimit(w, retryAfter)
+		return
+	}
+	writeError(w, http.StatusUnauthorized, "invalid_two_factor_code", "invalid two factor code")
 }
 
 func secondFactorLimitKeys(userID, sourceIP string) []string {
@@ -105,50 +119,28 @@ func secondFactorLimitKeys(userID, sourceIP string) []string {
 	}
 }
 
-func (r *router) verifyLoginCode(req *http.Request, setting store.UserTwoFactor, code string) (string, error) {
-	now := r.now()
+func (r *router) verifyLoginCode(setting store.UserTwoFactor, code string, now time.Time) (verifiedLoginCode, error) {
 	trimmedCode := strings.TrimSpace(code)
 	if len(trimmedCode) == 6 {
 		secret, err := r.twoFactor.DecryptSecret(setting.SecretCiphertext)
 		if err != nil {
-			return "", err
+			return verifiedLoginCode{}, err
 		}
 		counter, matched, err := auth.MatchTOTP(secret, trimmedCode, now)
 		if err != nil {
-			return "", err
+			return verifiedLoginCode{}, err
 		}
 		if !matched {
-			return "", errInvalidSecondFactor
+			return verifiedLoginCode{}, errInvalidSecondFactor
 		}
-		if err := r.store.ConsumeTOTPCounter(req.Context(), setting.UserID, setting.ConfigurationID, counter, now); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				return "", r.classifySecondFactorConflict(req, setting)
-			}
-			return "", err
-		}
-		return "totp", nil
+		return verifiedLoginCode{
+			method:      "totp",
+			totpCounter: sql.NullInt64{Int64: counter, Valid: true},
+		}, nil
 	}
 
-	hash := r.twoFactor.RecoveryCodeHash(setting.UserID, code)
-	if err := r.store.ConsumeRecoveryCode(req.Context(), setting.UserID, hash, now); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return "", r.classifySecondFactorConflict(req, setting)
-		}
-		return "", err
-	}
-	return "recovery_code", nil
-}
-
-func (r *router) classifySecondFactorConflict(req *http.Request, previous store.UserTwoFactor) error {
-	current, err := r.store.GetEnabledTwoFactor(req.Context(), previous.UserID)
-	if errors.Is(err, store.ErrNotFound) {
-		return errLoginRestartRequired
-	}
-	if err != nil {
-		return err
-	}
-	if current.ConfigurationID != previous.ConfigurationID {
-		return errLoginRestartRequired
-	}
-	return errInvalidSecondFactor
+	return verifiedLoginCode{
+		method:       "recovery_code",
+		recoveryHash: r.twoFactor.RecoveryCodeHash(setting.UserID, code),
+	}, nil
 }

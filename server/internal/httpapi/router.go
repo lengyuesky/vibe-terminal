@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1320,7 +1321,12 @@ func readLoginJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
 		return false
 	}
 	defer req.Body.Close()
-	decoder := json.NewDecoder(req.Body)
+	body, err := io.ReadAll(req.Body)
+	if err != nil || validateNoDuplicateJSONFields(body) != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON without duplicate fields")
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dest); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
@@ -1332,6 +1338,65 @@ func readLoginJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
 		return false
 	}
 	return true
+}
+
+func validateNoDuplicateJSONFields(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	_, err := decoder.Token()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err == nil {
+		return errors.New("请求体必须只包含一个 JSON 值")
+	}
+	return err
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("JSON 对象字段名无效")
+			}
+			if _, exists := seen[key]; exists {
+				return errors.New("JSON 对象包含重复字段")
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	default:
+		return errors.New("JSON 分隔符无效")
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

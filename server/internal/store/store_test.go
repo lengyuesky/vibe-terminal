@@ -97,6 +97,63 @@ func TestLoginChallengeLifecycle(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesLoginChallengeExpirationIndex(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	var indexName string
+	if err := db.SQL.QueryRowContext(ctx,
+		`select name from sqlite_master where type = 'index' and name = 'idx_login_challenges_expires_at'`).Scan(&indexName); err != nil {
+		t.Fatalf("login challenge expiration index was not created: %v", err)
+	}
+}
+
+func TestCreateLoginChallengeCleansAtMostOneHundredExpiredRows(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 10, 0, 0, 0, time.UTC)
+	if _, err := db.CreateUser(ctx, User{ID: "cleanup-user", Username: "cleanup-user", PasswordHash: "hash"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	for index := 0; index < 105; index++ {
+		if _, err := db.SQL.ExecContext(ctx,
+			`insert into login_challenges (jti, user_id, configuration_id, expires_at, created_at) values (?, ?, ?, ?, ?)`,
+			fmt.Sprintf("expired-%03d", index), "cleanup-user", "cleanup-configuration", now.Add(-time.Minute), now.Add(-10*time.Minute)); err != nil {
+			t.Fatalf("insert expired challenge %d: %v", index, err)
+		}
+	}
+	if _, err := db.SQL.ExecContext(ctx,
+		`insert into login_challenges (jti, user_id, configuration_id, expires_at, created_at) values (?, ?, ?, ?, ?)`,
+		"active-existing", "cleanup-user", "cleanup-configuration", now.Add(time.Minute), now); err != nil {
+		t.Fatalf("insert active challenge: %v", err)
+	}
+
+	if err := db.CreateLoginChallenge(ctx, LoginChallenge{
+		JTI:             "active-new",
+		UserID:          "cleanup-user",
+		ConfigurationID: "cleanup-configuration",
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+	var expiredCount int
+	if err := db.SQL.QueryRowContext(ctx,
+		`select count(*) from login_challenges where expires_at < ?`, now).Scan(&expiredCount); err != nil {
+		t.Fatalf("count expired challenges: %v", err)
+	}
+	if expiredCount != 5 {
+		t.Fatalf("expired challenge count = %d, want 5 after bounded cleanup", expiredCount)
+	}
+	var activeCount int
+	if err := db.SQL.QueryRowContext(ctx,
+		`select count(*) from login_challenges where jti in ('active-existing', 'active-new')`).Scan(&activeCount); err != nil {
+		t.Fatalf("count active challenges: %v", err)
+	}
+	if activeCount != 2 {
+		t.Fatalf("active challenge count = %d, want 2", activeCount)
+	}
+}
+
 func TestConcurrentConsumeLoginChallengeAllowsExactlyOneWinner(t *testing.T) {
 	ctx := context.Background()
 	db := openConcurrentStore(t, ctx)
@@ -126,6 +183,160 @@ func TestConcurrentConsumeLoginChallengeAllowsExactlyOneWinner(t *testing.T) {
 	)
 	cancel()
 	assertConcurrentDomainResults(t, errorsSeen, ErrConflict)
+}
+
+func TestConcurrentConsumeLoginSecondFactorRollsBackLosingRecoveryCode(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 9, 0, 0, 0, time.UTC)
+	const userID = "transaction-recovery-user"
+	const configurationID = "transaction-recovery-configuration"
+	hashes := []string{"transaction-recovery-hash-1", "transaction-recovery-hash-2"}
+	createEnabledTwoFactorFixture(t, ctx, db, userID, configurationID, 100, []RecoveryCodeInput{
+		{ID: "transaction-recovery-code-1", Hash: hashes[0]},
+		{ID: "transaction-recovery-code-2", Hash: hashes[1]},
+	}, now)
+	challenge := LoginChallenge{
+		JTI:             "transaction-recovery-challenge",
+		UserID:          userID,
+		ConfigurationID: configurationID,
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}
+	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+
+	type result struct {
+		hash string
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(hashes))
+	var ready sync.WaitGroup
+	ready.Add(len(hashes))
+	for _, hash := range hashes {
+		hash := hash
+		go func() {
+			ready.Done()
+			<-start
+			err := db.ConsumeLoginSecondFactor(ctx, ConsumeLoginSecondFactorParams{
+				ChallengeJTI:    challenge.JTI,
+				UserID:          userID,
+				ConfigurationID: configurationID,
+				RecoveryHash:    hash,
+				Now:             now.Add(time.Minute),
+			})
+			results <- result{hash: hash, err: err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var winnerHash string
+	var loserHash string
+	for range hashes {
+		got := <-results
+		switch {
+		case got.err == nil:
+			winnerHash = got.hash
+		case errors.Is(got.err, ErrLoginRestartRequired):
+			loserHash = got.hash
+		default:
+			t.Fatalf("consume login second factor returned unexpected error: %v", got.err)
+		}
+	}
+	if winnerHash == "" || loserHash == "" || winnerHash == loserHash {
+		t.Fatalf("concurrent recovery results winner=%q loser=%q", winnerHash, loserHash)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, userID, loserHash, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("losing recovery code was not rolled back: %v", err)
+	}
+	if err := db.ConsumeRecoveryCode(ctx, userID, winnerHash, now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("winning recovery code should be consumed, got %v", err)
+	}
+}
+
+func TestConcurrentConsumeLoginSecondFactorRollsBackMixedLoser(t *testing.T) {
+	ctx := context.Background()
+	db := openConcurrentStore(t, ctx)
+	now := time.Date(2026, time.July, 11, 9, 10, 0, 0, time.UTC)
+	const userID = "transaction-mixed-user"
+	const configurationID = "transaction-mixed-configuration"
+	const recoveryHash = "transaction-mixed-recovery-hash"
+	createEnabledTwoFactorFixture(t, ctx, db, userID, configurationID, 100, []RecoveryCodeInput{
+		{ID: "transaction-mixed-recovery-code", Hash: recoveryHash},
+	}, now)
+	challenge := LoginChallenge{
+		JTI:             "transaction-mixed-challenge",
+		UserID:          userID,
+		ConfigurationID: configurationID,
+		ExpiresAt:       now.Add(5 * time.Minute),
+		CreatedAt:       now,
+	}
+	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
+		t.Fatalf("create login challenge: %v", err)
+	}
+
+	type result struct {
+		kind string
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	go func() {
+		ready.Done()
+		<-start
+		results <- result{kind: "totp", err: db.ConsumeLoginSecondFactor(ctx, ConsumeLoginSecondFactorParams{
+			ChallengeJTI:    challenge.JTI,
+			UserID:          userID,
+			ConfigurationID: configurationID,
+			TOTPCounter:     sql.NullInt64{Int64: 101, Valid: true},
+			Now:             now.Add(time.Minute),
+		})}
+	}()
+	go func() {
+		ready.Done()
+		<-start
+		results <- result{kind: "recovery", err: db.ConsumeLoginSecondFactor(ctx, ConsumeLoginSecondFactorParams{
+			ChallengeJTI:    challenge.JTI,
+			UserID:          userID,
+			ConfigurationID: configurationID,
+			RecoveryHash:    recoveryHash,
+			Now:             now.Add(time.Minute),
+		})}
+	}()
+	ready.Wait()
+	close(start)
+
+	var loser string
+	var successes int
+	for range 2 {
+		got := <-results
+		switch {
+		case got.err == nil:
+			successes++
+		case errors.Is(got.err, ErrLoginRestartRequired):
+			loser = got.kind
+		default:
+			t.Fatalf("mixed consume returned unexpected error: %v", got.err)
+		}
+	}
+	if successes != 1 || loser == "" {
+		t.Fatalf("mixed concurrent results successes=%d loser=%q", successes, loser)
+	}
+	switch loser {
+	case "totp":
+		if err := db.ConsumeTOTPCounter(ctx, userID, configurationID, 101, now.Add(2*time.Minute)); err != nil {
+			t.Fatalf("losing TOTP counter was not rolled back: %v", err)
+		}
+	case "recovery":
+		if err := db.ConsumeRecoveryCode(ctx, userID, recoveryHash, now.Add(2*time.Minute)); err != nil {
+			t.Fatalf("losing recovery code was not rolled back: %v", err)
+		}
+	}
 }
 
 func TestConcurrentConsumeTOTPCounterAllowsExactlyOneWinner(t *testing.T) {

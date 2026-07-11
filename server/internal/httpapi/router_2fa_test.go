@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,8 +63,31 @@ func (w failingAuditWriter) Log(context.Context, store.AuditEvent) error {
 
 func newLoginTwoFactorFixture(t *testing.T, enabled bool) *loginTwoFactorFixture {
 	t.Helper()
+	return newLoginTwoFactorFixtureWithStore(t, testutil.NewStore(t), enabled)
+}
+
+func newConcurrentLoginTwoFactorFixture(t *testing.T, enabled bool) *loginTwoFactorFixture {
+	t.Helper()
 	ctx := context.Background()
-	db := testutil.NewStore(t)
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "login.db"))
+	if err != nil {
+		t.Fatalf("打开并发登录数据库失败：%v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("关闭并发登录数据库失败：%v", err)
+		}
+	})
+	db.SQL.SetMaxOpenConns(2)
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("迁移并发登录数据库失败：%v", err)
+	}
+	return newLoginTwoFactorFixtureWithStore(t, db, enabled)
+}
+
+func newLoginTwoFactorFixtureWithStore(t *testing.T, db *store.DB, enabled bool) *loginTwoFactorFixture {
+	t.Helper()
+	ctx := context.Background()
 	fixture := &loginTwoFactorFixture{
 		t:                  t,
 		db:                 db,
@@ -200,6 +225,29 @@ func (f *loginTwoFactorFixture) router() *router {
 		f.t.Fatalf("测试处理器类型 = %T，期望 *router", f.handler)
 	}
 	return r
+}
+
+func synchronizeConcurrentSecondFactorNow(f *loginTwoFactorFixture) {
+	f.t.Helper()
+	firstPhase := make(chan struct{})
+	secondPhase := make(chan struct{})
+	var calls atomic.Int32
+	f.router().now = func() time.Time {
+		call := calls.Add(1)
+		switch {
+		case call <= 2:
+			if call == 2 {
+				close(firstPhase)
+			}
+			<-firstPhase
+		case call <= 4:
+			if call == 4 {
+				close(secondPhase)
+			}
+			<-secondPhase
+		}
+		return f.now
+	}
 }
 
 func responseErrorCode(t *testing.T, rr *httptest.ResponseRecorder) string {
@@ -355,11 +403,15 @@ func TestConsumedChallengeRejectsAnotherRecoveryCode(t *testing.T) {
 }
 
 func TestConcurrentChallengeUseCreatesExactlyOneSession(t *testing.T) {
-	fixture := newLoginTwoFactorFixture(t, true)
-	fixture.db.SQL.SetMaxOpenConns(1)
+	fixture := newConcurrentLoginTwoFactorFixture(t, true)
 	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+	synchronizeConcurrentSecondFactorNow(fixture)
 	start := make(chan struct{})
-	results := make(chan *httptest.ResponseRecorder, 2)
+	type result struct {
+		code string
+		rr   *httptest.ResponseRecorder
+	}
+	results := make(chan result, 2)
 	var ready sync.WaitGroup
 	ready.Add(2)
 	for _, code := range []string{fixture.recoveryCode, fixture.secondRecoveryCode} {
@@ -367,7 +419,7 @@ func TestConcurrentChallengeUseCreatesExactlyOneSession(t *testing.T) {
 		go func() {
 			ready.Done()
 			<-start
-			results <- fixture.secondFactor(challenge, code, "application/json")
+			results <- result{code: code, rr: fixture.secondFactor(challenge, code, "application/json")}
 		}()
 	}
 	ready.Wait()
@@ -375,8 +427,10 @@ func TestConcurrentChallengeUseCreatesExactlyOneSession(t *testing.T) {
 
 	var successes int
 	var restarts int
+	var loserCode string
 	for range 2 {
-		rr := <-results
+		got := <-results
+		rr := got.rr
 		switch rr.Code {
 		case http.StatusOK:
 			successes++
@@ -385,6 +439,7 @@ func TestConcurrentChallengeUseCreatesExactlyOneSession(t *testing.T) {
 			}
 		case http.StatusUnauthorized:
 			restarts++
+			loserCode = got.code
 			if responseErrorCode(t, rr) != "login_restart_required" {
 				t.Fatalf("并发失败响应 = %s", rr.Body.String())
 			}
@@ -395,6 +450,70 @@ func TestConcurrentChallengeUseCreatesExactlyOneSession(t *testing.T) {
 	}
 	if successes != 1 || restarts != 1 {
 		t.Fatalf("并发挑战结果：成功=%d，重启=%d", successes, restarts)
+	}
+	fixture.router().now = func() time.Time { return fixture.now }
+	newChallenge := fixture.beginTwoFactorLogin().ChallengeToken
+	rr := fixture.secondFactor(newChallenge, loserCode, "application/json")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("并发失败方恢复码未回滚：状态码=%d，响应=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestConcurrentTOTPAndRecoveryUseRollsBackLosingFactor(t *testing.T) {
+	fixture := newConcurrentLoginTwoFactorFixture(t, true)
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
+	synchronizeConcurrentSecondFactorNow(fixture)
+	type factor struct {
+		kind string
+		code string
+	}
+	factors := []factor{
+		{kind: "totp", code: fixture.currentTOTP()},
+		{kind: "recovery", code: fixture.recoveryCode},
+	}
+	type result struct {
+		factor factor
+		rr     *httptest.ResponseRecorder
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, candidate := range factors {
+		candidate := candidate
+		go func() {
+			ready.Done()
+			<-start
+			results <- result{factor: candidate, rr: fixture.secondFactor(challenge, candidate.code, "application/json")}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var successes int
+	var loser factor
+	for range 2 {
+		got := <-results
+		switch got.rr.Code {
+		case http.StatusOK:
+			successes++
+		case http.StatusUnauthorized:
+			if responseErrorCode(t, got.rr) != "login_restart_required" {
+				t.Fatalf("混合并发失败响应 = %s", got.rr.Body.String())
+			}
+			loser = got.factor
+		default:
+			t.Fatalf("混合并发状态码 = %d，响应=%s", got.rr.Code, got.rr.Body.String())
+		}
+	}
+	if successes != 1 || loser.kind == "" {
+		t.Fatalf("混合并发结果：成功=%d，失败方=%#v", successes, loser)
+	}
+	fixture.router().now = func() time.Time { return fixture.now }
+	newChallenge := fixture.beginTwoFactorLogin().ChallengeToken
+	rr := fixture.secondFactor(newChallenge, loser.code, "application/json")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("混合并发失败方 %s 未回滚：状态码=%d，响应=%s", loser.kind, rr.Code, rr.Body.String())
 	}
 }
 
@@ -413,61 +532,92 @@ func TestChangedConfigurationRejectsOldChallenge(t *testing.T) {
 	}
 }
 
-func TestVerifyLoginCodeRestartsWhenConfigurationRotatesAfterRead(t *testing.T) {
+func TestLoginSecondFactorTransactionRestartsWhenConfigurationRotatesAfterRead(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, true)
+	token := fixture.beginTwoFactorLogin().ChallengeToken
+	challenge, err := fixture.manager.VerifyLoginChallengeAt(token, fixture.now)
+	if err != nil {
+		t.Fatalf("验证登录挑战失败：%v", err)
+	}
 	setting, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID)
 	if err != nil {
 		t.Fatalf("读取旧双因素配置失败：%v", err)
+	}
+	verified, err := fixture.router().verifyLoginCode(setting, fixture.currentTOTP(), fixture.now)
+	if err != nil {
+		t.Fatalf("验证 TOTP 失败：%v", err)
 	}
 	if _, err := fixture.db.SQL.ExecContext(context.Background(),
 		`update user_two_factor set configuration_id = ? where user_id = ?`,
 		"configuration-rotated", testLoginUserID); err != nil {
 		t.Fatalf("轮换双因素配置失败：%v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/login/2fa", nil)
 
-	_, err = fixture.router().verifyLoginCode(req, setting, fixture.currentTOTP())
-	if !errors.Is(err, errLoginRestartRequired) {
+	err = fixture.db.ConsumeLoginSecondFactor(context.Background(), store.ConsumeLoginSecondFactorParams{
+		ChallengeJTI:    challenge.JTI,
+		UserID:          challenge.UserID,
+		ConfigurationID: challenge.ConfigurationID,
+		TOTPCounter:     verified.totpCounter,
+		Now:             fixture.now,
+	})
+	if !errors.Is(err, store.ErrLoginRestartRequired) {
 		t.Fatalf("配置轮换后的校验错误 = %v，期望 login restart", err)
+	}
+	if _, err := fixture.db.GetActiveLoginChallenge(context.Background(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, fixture.now); err != nil {
+		t.Fatalf("配置轮换后 challenge 应回滚为可用：%v", err)
 	}
 }
 
-func TestVerifyLoginCodeRestartsWhenConfigurationDisabledAfterRead(t *testing.T) {
+func TestLoginSecondFactorTransactionRestartsWhenConfigurationDisabledAfterRead(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, true)
+	token := fixture.beginTwoFactorLogin().ChallengeToken
+	challenge, err := fixture.manager.VerifyLoginChallengeAt(token, fixture.now)
+	if err != nil {
+		t.Fatalf("验证登录挑战失败：%v", err)
+	}
 	setting, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID)
 	if err != nil {
 		t.Fatalf("读取旧双因素配置失败：%v", err)
 	}
+	verified, err := fixture.router().verifyLoginCode(setting, fixture.currentTOTP(), fixture.now)
+	if err != nil {
+		t.Fatalf("验证 TOTP 失败：%v", err)
+	}
 	if err := fixture.db.DisableTwoFactor(context.Background(), testLoginUserID); err != nil {
 		t.Fatalf("禁用双因素配置失败：%v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/login/2fa", nil)
 
-	_, err = fixture.router().verifyLoginCode(req, setting, fixture.currentTOTP())
-	if !errors.Is(err, errLoginRestartRequired) {
+	err = fixture.db.ConsumeLoginSecondFactor(context.Background(), store.ConsumeLoginSecondFactorParams{
+		ChallengeJTI:    challenge.JTI,
+		UserID:          challenge.UserID,
+		ConfigurationID: challenge.ConfigurationID,
+		TOTPCounter:     verified.totpCounter,
+		Now:             fixture.now,
+	})
+	if !errors.Is(err, store.ErrLoginRestartRequired) {
 		t.Fatalf("配置禁用后的校验错误 = %v，期望 login restart", err)
+	}
+	if _, err := fixture.db.GetActiveLoginChallenge(context.Background(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, fixture.now); err != nil {
+		t.Fatalf("配置禁用后 challenge 应回滚为可用：%v", err)
 	}
 }
 
-func TestVerifyLoginCodeCapturesNowOnce(t *testing.T) {
+func TestSecondFactorRequestCapturesNowOnce(t *testing.T) {
 	fixture := newLoginTwoFactorFixture(t, true)
-	setting, err := fixture.db.GetEnabledTwoFactor(context.Background(), testLoginUserID)
-	if err != nil {
-		t.Fatalf("读取双因素配置失败：%v", err)
-	}
+	challenge := fixture.beginTwoFactorLogin().ChallengeToken
 	r := fixture.router()
 	calls := 0
 	r.now = func() time.Time {
 		calls++
 		return fixture.now
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/login/2fa", nil)
 
-	if _, err := r.verifyLoginCode(req, setting, fixture.currentTOTP()); err != nil {
-		t.Fatalf("校验 TOTP 失败：%v", err)
+	rr := fixture.secondFactor(challenge, fixture.currentTOTP(), "application/json")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("二步登录状态码 = %d，响应=%s", rr.Code, rr.Body.String())
 	}
 	if calls != 1 {
-		t.Fatalf("一次验证码校验读取时钟 %d 次，期望 1 次", calls)
+		t.Fatalf("一次二步请求读取路由时钟 %d 次，期望 1 次", calls)
 	}
 }
 
@@ -683,6 +833,11 @@ func TestLoginJSONRejectsUnknownFieldsMultipleValuesAndTrailingContent(t *testin
 			body: `{"username":"admin","password":"secret"} trailing`,
 		},
 		{
+			name: "密码重复字段",
+			path: "/api/login",
+			body: `{"username":"ignored","username":"admin","password":"secret"}`,
+		},
+		{
 			name: "二因素未知字段",
 			path: "/api/login/2fa",
 			body: `{"challenge_token":"invalid","code":"123456","unexpected":true}`,
@@ -696,6 +851,11 @@ func TestLoginJSONRejectsUnknownFieldsMultipleValuesAndTrailingContent(t *testin
 			name: "二因素尾随垃圾",
 			path: "/api/login/2fa",
 			body: `{"challenge_token":"invalid","code":"123456"} trailing`,
+		},
+		{
+			name: "二因素重复字段",
+			path: "/api/login/2fa",
+			body: `{"challenge_token":"invalid","code":"000000","code":"123456"}`,
 		},
 	}
 	for _, tt := range tests {

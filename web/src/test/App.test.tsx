@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView, useAgentTokenState } from '../App';
+import { StrictMode, useEffect } from 'react';
 import * as api from '../api';
 
 vi.mock('../components/SecurityView', async (importOriginal) => {
@@ -96,7 +97,36 @@ function TokenStateHarness({ user }: { user: api.User | null }) {
   );
 }
 
+function AutoLoadTokenHarness({ user }: { user: api.User }) {
+  const state = useAgentTokenState(user);
+  useEffect(() => { void state.load(); }, [state.load]);
+  return <span>{state.loading ? 'loading' : state.tokens.map((token) => token.name).join(',') || 'empty'}</span>;
+}
+
 describe('useAgentTokenState', () => {
+  it('首次列表完成后load保持稳定且不产生刷新循环', async () => {
+    mockedApi.listAgentTokens.mockResolvedValue([{ id: 'token-1', name: 'stable', created_at: '', expires_at: '' }]);
+    render(<AutoLoadTokenHarness user={{ id: 'user-a', username: 'a' }} />);
+    expect(await screen.findByText('stable')).toBeInTheDocument();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockedApi.listAgentTokens).toHaveBeenCalledOnce();
+  });
+
+  it.each(['success', 'failure'] as const)('StrictMode下list %s仍复位loading', async (outcome) => {
+    if (outcome === 'success') mockedApi.listAgentTokens.mockResolvedValue([]);
+    else mockedApi.listAgentTokens.mockRejectedValue(new Error('failed'));
+    render(<StrictMode><AutoLoadTokenHarness user={{ id: 'user-a', username: 'a' }} /></StrictMode>);
+    expect(await screen.findByText('empty')).toBeInTheDocument();
+    expect(screen.queryByText('loading')).not.toBeInTheDocument();
+  });
+
+  it('StrictMode下create成功仍可写回明文Token并复位loading', async () => {
+    mockedApi.createAgentToken.mockResolvedValue({ id: 'token-a', name: 'agent-a', token: 'strict-raw', created_at: '', expires_at: '' });
+    render(<StrictMode><TokenStateHarness user={{ id: 'user-a', username: 'a' }} /></StrictMode>);
+    await userEvent.click(screen.getByRole('button', { name: 'create' }));
+    expect(await screen.findByText('strict-raw')).toBeInTheDocument();
+    expect(screen.getByText('idle')).toBeInTheDocument();
+  });
   it.each(['list', 'create', 'revoke', 'delete'] as const)(
     '用户切换后忽略用户A延迟的 %s 成功和失败结果',
     async (operation) => {

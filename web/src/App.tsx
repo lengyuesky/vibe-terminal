@@ -30,28 +30,39 @@ export function useAgentTokenState(user: User | null) {
     userIdRef.current = userId;
     generationRef.current += 1;
   }
-  useEffect(() => () => {
-    mountedRef.current = false;
-    generationRef.current += 1;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationRef.current += 1;
+    };
   }, []);
   const current = state.userId === userId ? state : { userId, tokens: [], createdToken: null, loading: false, error: null };
+  const scopedStateRef = useRef(current);
+  scopedStateRef.current = current;
   const begin = () => ({ generation: generationRef.current, userId });
   const valid = (request: { generation: number; userId: string | null }) =>
     mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current;
 
   const load = useCallback(async () => {
-    const request = begin();
+    const request = { generation: generationRef.current, userId };
     if (!request.userId) return;
-    setState({ userId: request.userId, tokens: current.tokens, createdToken: current.createdToken, loading: true, error: null });
+    setState({ ...scopedStateRef.current, userId: request.userId, loading: true, error: null });
     try {
       const tokens = await api.listAgentTokens();
-      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, tokens }));
+      if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
+        setState((value) => ({ ...value, userId: request.userId, tokens }));
+      }
     } catch {
-      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, error: 'Failed to load agent tokens.' }));
+      if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
+        setState((value) => ({ ...value, userId: request.userId, error: 'Failed to load agent tokens.' }));
+      }
     } finally {
-      if (valid(request)) setState((value) => ({ ...value, userId: request.userId, loading: false }));
+      if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
+        setState((value) => ({ ...value, userId: request.userId, loading: false }));
+      }
     }
-  }, [userId, current.tokens, current.createdToken]);
+  }, [userId]);
 
   async function mutate<T>(action: () => Promise<T>, failure: string, apply: (value: T) => void) {
     const request = begin();

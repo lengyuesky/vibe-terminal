@@ -1314,14 +1314,22 @@ func readJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
 	return true
 }
 
+const maxLoginJSONBytes int64 = 16 << 10
+
 func readLoginJSON(w http.ResponseWriter, req *http.Request, dest any) bool {
 	mediaType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
 		return false
 	}
-	defer req.Body.Close()
-	body, err := io.ReadAll(req.Body)
+	limitedBody := http.MaxBytesReader(w, req.Body, maxLoginJSONBytes)
+	defer limitedBody.Close()
+	body, err := io.ReadAll(limitedBody)
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the login size limit")
+		return false
+	}
 	if err != nil || validateNoDuplicateJSONFields(body) != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON without duplicate fields")
 		return false

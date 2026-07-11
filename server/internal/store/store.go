@@ -339,34 +339,6 @@ func (db *DB) CreateLoginChallenge(ctx context.Context, challenge LoginChallenge
 	return tx.Commit()
 }
 
-// GetActiveLoginChallenge 返回未消费且尚未过期的登录挑战。
-func (db *DB) GetActiveLoginChallenge(ctx context.Context, jti, userID, configurationID string, now time.Time) (LoginChallenge, error) {
-	row := db.SQL.QueryRowContext(ctx,
-		`select jti, user_id, configuration_id, expires_at, consumed_at, created_at
-		 from login_challenges
-		 where jti = ? and user_id = ? and configuration_id = ?
-		 and consumed_at is null and expires_at >= ?`,
-		jti, userID, configurationID, now.UTC())
-	var challenge LoginChallenge
-	err := row.Scan(&challenge.JTI, &challenge.UserID, &challenge.ConfigurationID,
-		&challenge.ExpiresAt, &challenge.ConsumedAt, &challenge.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return LoginChallenge{}, ErrNotFound
-	}
-	return challenge, err
-}
-
-// ConsumeLoginChallenge 原子标记挑战已消费，防止跨进程重复登录。
-func (db *DB) ConsumeLoginChallenge(ctx context.Context, jti, userID, configurationID string, now time.Time) error {
-	now = now.UTC()
-	result, err := db.SQL.ExecContext(ctx,
-		`update login_challenges set consumed_at = ?
-		 where jti = ? and user_id = ? and configuration_id = ?
-		 and consumed_at is null and expires_at >= ?`,
-		now, jti, userID, configurationID, now)
-	return requireAffected(result, err, ErrConflict)
-}
-
 // ConsumeLoginSecondFactor 在同一事务内校验配置并消费挑战和二因素凭据。
 func (db *DB) ConsumeLoginSecondFactor(ctx context.Context, params ConsumeLoginSecondFactorParams) error {
 	hasTOTP := params.TOTPCounter.Valid

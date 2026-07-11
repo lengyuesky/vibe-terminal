@@ -57,6 +57,17 @@ type failingAuditWriter struct {
 	err error
 }
 
+type countingReader struct {
+	reader *strings.Reader
+	read   int
+}
+
+func (r *countingReader) Read(buffer []byte) (int, error) {
+	count, err := r.reader.Read(buffer)
+	r.read += count
+	return count, err
+}
+
 func (w failingAuditWriter) Log(context.Context, store.AuditEvent) error {
 	return w.err
 }
@@ -293,6 +304,18 @@ func loginRateLimitAudits(t *testing.T, db *store.DB) []map[string]string {
 		t.Fatalf("遍历登录限流审计失败：%v", err)
 	}
 	return audits
+}
+
+func assertLoginChallengeUnconsumed(t *testing.T, db *store.DB, jti string) {
+	t.Helper()
+	var consumedAt sql.NullTime
+	if err := db.SQL.QueryRowContext(context.Background(),
+		`select consumed_at from login_challenges where jti = ?`, jti).Scan(&consumedAt); err != nil {
+		t.Fatalf("查询登录挑战消费状态失败：%v", err)
+	}
+	if consumedAt.Valid {
+		t.Fatalf("登录挑战 %s 不应被消费：%v", jti, consumedAt.Time)
+	}
 }
 
 func TestPasswordLoginWithEnabledTwoFactorReturnsChallengeWithoutSession(t *testing.T) {
@@ -563,9 +586,7 @@ func TestLoginSecondFactorTransactionRestartsWhenConfigurationRotatesAfterRead(t
 	if !errors.Is(err, store.ErrLoginRestartRequired) {
 		t.Fatalf("配置轮换后的校验错误 = %v，期望 login restart", err)
 	}
-	if _, err := fixture.db.GetActiveLoginChallenge(context.Background(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, fixture.now); err != nil {
-		t.Fatalf("配置轮换后 challenge 应回滚为可用：%v", err)
-	}
+	assertLoginChallengeUnconsumed(t, fixture.db, challenge.JTI)
 }
 
 func TestLoginSecondFactorTransactionRestartsWhenConfigurationDisabledAfterRead(t *testing.T) {
@@ -597,9 +618,7 @@ func TestLoginSecondFactorTransactionRestartsWhenConfigurationDisabledAfterRead(
 	if !errors.Is(err, store.ErrLoginRestartRequired) {
 		t.Fatalf("配置禁用后的校验错误 = %v，期望 login restart", err)
 	}
-	if _, err := fixture.db.GetActiveLoginChallenge(context.Background(), challenge.JTI, challenge.UserID, challenge.ConfigurationID, fixture.now); err != nil {
-		t.Fatalf("配置禁用后 challenge 应回滚为可用：%v", err)
-	}
+	assertLoginChallengeUnconsumed(t, fixture.db, challenge.JTI)
 }
 
 func TestSecondFactorRequestCapturesNowOnce(t *testing.T) {
@@ -870,6 +889,44 @@ func TestLoginJSONRejectsUnknownFieldsMultipleValuesAndTrailingContent(t *testin
 				t.Fatalf("严格 JSON 响应 = %d %s", rr.Code, rr.Body.String())
 			}
 			assertNoSessionCookie(t, rr)
+		})
+	}
+}
+
+func TestLoginJSONRejectsOversizedBodiesWithoutUnboundedRead(t *testing.T) {
+	fixture := newLoginTwoFactorFixture(t, false)
+	const limit = 16 << 10
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "密码字段过大",
+			path: "/api/login",
+			body: `{"username":"admin","password":"` + strings.Repeat("x", limit*2) + `"}`,
+		},
+		{
+			name: "二因素未知字段过大",
+			path: "/api/login/2fa",
+			body: `{"challenge_token":"invalid","code":"123456","unexpected":"` + strings.Repeat("x", limit*2) + `"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &countingReader{reader: strings.NewReader(tt.body)}
+			req := httptest.NewRequest(http.MethodPost, tt.path, reader)
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = testLoginIP + ":43210"
+			rr := httptest.NewRecorder()
+
+			fixture.handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusRequestEntityTooLarge || responseErrorCode(t, rr) != "request_too_large" {
+				t.Fatalf("超大登录请求响应 = %d %s", rr.Code, rr.Body.String())
+			}
+			if reader.read > limit+1 {
+				t.Fatalf("超大登录请求读取 %d 字节，期望不超过 %d", reader.read, limit+1)
+			}
 		})
 	}
 }

@@ -66,9 +66,10 @@ func TestLoginChallengeLifecycle(t *testing.T) {
 	ctx := context.Background()
 	db := openConcurrentStore(t, ctx)
 	now := time.Date(2026, time.July, 11, 8, 0, 0, 0, time.UTC)
-	if _, err := db.CreateUser(ctx, User{ID: "challenge-user", Username: "challenge-user", PasswordHash: "hash"}); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
+	const recoveryHash = "challenge-recovery-hash"
+	createEnabledTwoFactorFixture(t, ctx, db, "challenge-user", "challenge-configuration", 100, []RecoveryCodeInput{
+		{ID: "challenge-recovery-code", Hash: recoveryHash},
+	}, now)
 	challenge := LoginChallenge{
 		JTI:             "challenge-jti",
 		UserID:          "challenge-user",
@@ -79,21 +80,34 @@ func TestLoginChallengeLifecycle(t *testing.T) {
 	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
 		t.Fatalf("create login challenge: %v", err)
 	}
-	active, err := db.GetActiveLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now)
-	if err != nil {
-		t.Fatalf("get active login challenge: %v", err)
+	var stored LoginChallenge
+	if err := db.SQL.QueryRowContext(ctx,
+		`select jti, user_id, configuration_id, expires_at, consumed_at, created_at from login_challenges where jti = ?`,
+		challenge.JTI).Scan(&stored.JTI, &stored.UserID, &stored.ConfigurationID, &stored.ExpiresAt, &stored.ConsumedAt, &stored.CreatedAt); err != nil {
+		t.Fatalf("query login challenge: %v", err)
 	}
-	if active.JTI != challenge.JTI || active.UserID != challenge.UserID || active.ConfigurationID != challenge.ConfigurationID {
-		t.Fatalf("active login challenge = %#v, want %#v", active, challenge)
+	if stored.JTI != challenge.JTI || stored.UserID != challenge.UserID || stored.ConfigurationID != challenge.ConfigurationID || stored.ConsumedAt.Valid {
+		t.Fatalf("stored login challenge = %#v, want unconsumed %#v", stored, challenge)
 	}
-	if err := db.ConsumeLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); err != nil {
-		t.Fatalf("consume login challenge: %v", err)
+	params := ConsumeLoginSecondFactorParams{
+		ChallengeJTI:    challenge.JTI,
+		UserID:          challenge.UserID,
+		ConfigurationID: challenge.ConfigurationID,
+		RecoveryHash:    recoveryHash,
+		Now:             now.Add(time.Minute),
 	}
-	if _, err := db.GetActiveLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("consumed challenge lookup error = %v, want ErrNotFound", err)
+	if err := db.ConsumeLoginSecondFactor(ctx, params); err != nil {
+		t.Fatalf("consume login second factor: %v", err)
 	}
-	if err := db.ConsumeLoginChallenge(ctx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("reconsume login challenge error = %v, want ErrConflict", err)
+	if err := db.SQL.QueryRowContext(ctx,
+		`select consumed_at from login_challenges where jti = ?`, challenge.JTI).Scan(&stored.ConsumedAt); err != nil {
+		t.Fatalf("query consumed login challenge: %v", err)
+	}
+	if !stored.ConsumedAt.Valid {
+		t.Fatal("login challenge should be consumed")
+	}
+	if err := db.ConsumeLoginSecondFactor(ctx, params); !errors.Is(err, ErrLoginRestartRequired) {
+		t.Fatalf("reconsume login second factor error = %v, want ErrLoginRestartRequired", err)
 	}
 }
 
@@ -152,37 +166,6 @@ func TestCreateLoginChallengeCleansAtMostOneHundredExpiredRows(t *testing.T) {
 	if activeCount != 2 {
 		t.Fatalf("active challenge count = %d, want 2", activeCount)
 	}
-}
-
-func TestConcurrentConsumeLoginChallengeAllowsExactlyOneWinner(t *testing.T) {
-	ctx := context.Background()
-	db := openConcurrentStore(t, ctx)
-	now := time.Date(2026, time.July, 11, 8, 0, 0, 0, time.UTC)
-	if _, err := db.CreateUser(ctx, User{ID: "concurrent-challenge-user", Username: "concurrent-challenge-user", PasswordHash: "hash"}); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	challenge := LoginChallenge{
-		JTI:             "concurrent-challenge-jti",
-		UserID:          "concurrent-challenge-user",
-		ConfigurationID: "concurrent-challenge-configuration",
-		ExpiresAt:       now.Add(5 * time.Minute),
-		CreatedAt:       now,
-	}
-	if err := db.CreateLoginChallenge(ctx, challenge); err != nil {
-		t.Fatalf("create login challenge: %v", err)
-	}
-
-	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	errorsSeen := runConcurrentStoreCalls(t,
-		func() error {
-			return db.ConsumeLoginChallenge(writeCtx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute))
-		},
-		func() error {
-			return db.ConsumeLoginChallenge(writeCtx, challenge.JTI, challenge.UserID, challenge.ConfigurationID, now.Add(time.Minute))
-		},
-	)
-	cancel()
-	assertConcurrentDomainResults(t, errorsSeen, ErrConflict)
 }
 
 func TestConcurrentConsumeLoginSecondFactorRollsBackLosingRecoveryCode(t *testing.T) {

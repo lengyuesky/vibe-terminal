@@ -1101,6 +1101,36 @@ func TestManagementLimiterDoesNotCountStoreOrCryptoFailures(t *testing.T) {
 	}
 }
 
+func TestConcurrentManagementFailuresProduceOneThresholdAudit(t *testing.T) {
+	fixture := newConcurrentLoginTwoFactorFixture(t, false)
+	cookie := fixture.authenticatedCookie()
+	fixture.useManagementLimiter(auth.NewFailureLimiter(2, 10*time.Minute, 15*time.Minute, 100, func() time.Time { return fixture.now }))
+	const requests = 12
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, requests)
+	for range requests {
+		go func() {
+			<-start
+			results <- fixture.managementRequest(http.MethodPost, "/api/security/2fa/setup", `{"password":"wrong"}`, "application/json", cookie)
+		}()
+	}
+	close(start)
+	for range requests {
+		rr := <-results
+		if rr.Code != http.StatusUnauthorized && rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("并发管理失败响应 = %d %s", rr.Code, rr.Body.String())
+		}
+	}
+	var auditCount int
+	if err := fixture.db.SQL.QueryRowContext(context.Background(),
+		`select count(*) from audit_events where event_type = 'management_reauthentication_rate_limited'`).Scan(&auditCount); err != nil {
+		t.Fatalf("查询并发管理限流审计失败：%v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("并发管理限流审计数量 = %d，期望 1", auditCount)
+	}
+}
+
 func TestRequireUserDistinguishesMissingUserFromStoreFailure(t *testing.T) {
 	t.Run("会话用户不存在返回未认证", func(t *testing.T) {
 		fixture := newLoginTwoFactorFixture(t, false)

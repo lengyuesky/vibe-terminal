@@ -50,6 +50,13 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	r.managementAuthMu.Lock()
+	managementLocked := true
+	defer func() {
+		if managementLocked {
+			r.managementAuthMu.Unlock()
+		}
+	}()
 	ip, limitKeys := r.managementAttempt(w, req, user.ID)
 	if limitKeys == nil {
 		return
@@ -58,6 +65,8 @@ func (r *router) handleTwoFactorSetup(w http.ResponseWriter, req *http.Request) 
 		r.writeInvalidManagementCredential(w, req, user.ID, "setup_password", ip, limitKeys, "invalid_credentials", "invalid current password")
 		return
 	}
+	r.managementAuthMu.Unlock()
+	managementLocked = false
 	if r.twoFactor == nil {
 		writeError(w, http.StatusInternalServerError, "two_factor_unavailable", "two factor authentication is unavailable")
 		return
@@ -119,6 +128,8 @@ func (r *router) handleTwoFactorEnable(w http.ResponseWriter, req *http.Request)
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	r.managementAuthMu.Lock()
+	defer r.managementAuthMu.Unlock()
 	ip, limitKeys := r.managementAttempt(w, req, user.ID)
 	if limitKeys == nil {
 		return
@@ -186,6 +197,8 @@ func (r *router) handleTwoFactorRecoveryCodes(w http.ResponseWriter, req *http.R
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	r.managementAuthMu.Lock()
+	defer r.managementAuthMu.Unlock()
 	ip, limitKeys := r.managementAttempt(w, req, user.ID)
 	if limitKeys == nil {
 		return
@@ -272,6 +285,8 @@ func (r *router) handleTwoFactorDisable(w http.ResponseWriter, req *http.Request
 	if !readLoginJSON(w, req, &body) {
 		return
 	}
+	r.managementAuthMu.Lock()
+	defer r.managementAuthMu.Unlock()
 	ip, limitKeys := r.managementAttempt(w, req, user.ID)
 	if limitKeys == nil {
 		return

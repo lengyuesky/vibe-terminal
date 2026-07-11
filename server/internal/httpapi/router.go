@@ -65,6 +65,7 @@ type router struct {
 	passwordLimiter            *auth.FailureLimiter
 	twoFactorLimiter           *auth.FailureLimiter
 	managementLimiter          *auth.FailureLimiter
+	managementAuthMu           sync.Mutex
 	beforePendingTwoFactorSave func()
 	now                        func() time.Time
 	presence                   *devices.Presence

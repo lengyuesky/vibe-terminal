@@ -1,16 +1,18 @@
-import { KeyRound, Monitor, ShieldCheck, Terminal } from 'lucide-react';
-import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ComponentType, ErrorInfo, ReactNode } from 'react';
+import { KeyRound, Monitor, Settings, Terminal } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
 import { DeviceList } from './components/DeviceList';
 import { FileManagerPanel } from './components/FileManagerPanel';
 import { LoginView } from './components/LoginView';
+import { SettingsView } from './components/SettingsView';
+import type { SecurityLoader } from './components/SettingsView';
 import { TerminalTabs } from './components/TerminalTabs';
+import { useT } from './i18n';
 
 type SessionsByDevice = Record<string, Session[]>;
-type ViewMode = 'terminals' | 'agentTokens' | 'security';
+type ViewMode = 'terminals' | 'agentTokens' | 'settings' | 'devices';
 
 type AgentTokenState = {
   userId: string | null;
@@ -106,43 +108,6 @@ export function useAgentTokenState(user: User | null) {
       })
   );
   return { tokens: current.tokens, createdToken: current.createdToken, loading: current.loading, error: current.error, load, create, revoke, remove };
-}
-
-type SecurityViewProps = { onRecoveryDeliveryLockChange?: (locked: boolean) => void };
-type SecurityLoader = () => Promise<{ default: ComponentType<SecurityViewProps> }>;
-const defaultSecurityLoader: SecurityLoader = () =>
-  import('./components/SecurityView').then((module) => ({ default: module.SecurityView }));
-
-class SecurityErrorBoundary extends Component<
-  { children: ReactNode; onRetry: () => void },
-  { failed: boolean }
-> {
-  state = { failed: false };
-  static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(_error: Error, _info: ErrorInfo) {}
-  render() {
-    if (this.state.failed) {
-      return (
-        <section className="securityLoading" role="alert">
-          <p>Security settings failed to load.</p>
-          <button type="button" onClick={this.props.onRetry}>Retry loading security settings</button>
-        </section>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-function SecurityPanel({ loader, onRecoveryDeliveryLockChange }: { loader: SecurityLoader; onRecoveryDeliveryLockChange: (locked: boolean) => void }) {
-  const [attempt, setAttempt] = useState(0);
-  const LazySecurityView = useMemo(() => lazy(loader), [loader, attempt]);
-  return (
-    <SecurityErrorBoundary key={attempt} onRetry={() => setAttempt((value) => value + 1)}>
-      <Suspense fallback={<p className="securityLoading" role="status" aria-label="Loading security settings">Loading security settings...</p>}>
-        <LazySecurityView onRecoveryDeliveryLockChange={onRecoveryDeliveryLockChange} />
-      </Suspense>
-    </SecurityErrorBoundary>
-  );
 }
 
 function enrichSessionDevice(session: Session, deviceId: string, device?: Device): Session {
@@ -308,8 +273,9 @@ function AuthenticatedAppView({
   onRevokeAgentToken,
   onDeleteAgentToken = async () => {},
   onRefreshAgentTokens,
-  securityLoader = defaultSecurityLoader,
+  securityLoader,
 }: Omit<AppViewProps, 'user'> & { user: User }) {
+  const { t } = useT();
   const devicesById = useMemo(() => new Map(devices.map((device) => [device.id, device])), [devices]);
   const initialSessions = useMemo(
     () =>
@@ -363,7 +329,7 @@ function AuthenticatedAppView({
           <Terminal size={18} aria-hidden="true" />
           <span>vibe-terminal</span>
         </div>
-        <nav className="sideNav" aria-label="Primary">
+        <nav className="sideNav" aria-label={t('nav.primary')}>
           <button
             type="button"
             disabled={securityDeliveryLocked}
@@ -372,7 +338,7 @@ function AuthenticatedAppView({
             onClick={() => setViewMode('terminals')}
           >
             <Monitor size={16} aria-hidden="true" />
-            Terminals
+            {t('nav.terminals')}
           </button>
           <button
             type="button"
@@ -382,16 +348,16 @@ function AuthenticatedAppView({
             onClick={() => setViewMode('agentTokens')}
           >
             <KeyRound size={16} aria-hidden="true" />
-            Agent Tokens
+            {t('nav.agentTokens')}
           </button>
           <button
             type="button"
-            aria-current={viewMode === 'security' ? 'page' : undefined}
-            className={viewMode === 'security' ? 'active' : ''}
-            onClick={() => setViewMode('security')}
+            aria-current={viewMode === 'settings' ? 'page' : undefined}
+            className={viewMode === 'settings' ? 'active' : ''}
+            onClick={() => setViewMode('settings')}
           >
-            <ShieldCheck size={16} aria-hidden="true" />
-            Security
+            <Settings size={16} aria-hidden="true" />
+            {t('nav.settings')}
           </button>
         </nav>
         <DeviceList
@@ -422,10 +388,12 @@ function AuthenticatedAppView({
           onRefresh={onRefreshAgentTokens}
         />
       </div>
-      {viewMode === 'security' && (
-        <main className="securityPage">
-          <SecurityPanel loader={securityLoader} onRecoveryDeliveryLockChange={setSecurityDeliveryLocked} />
-        </main>
+      {viewMode === 'settings' && (
+        <SettingsView
+          securityLoader={securityLoader}
+          onRecoveryDeliveryLockChange={setSecurityDeliveryLocked}
+          deliveryLocked={securityDeliveryLocked}
+        />
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}
     </div>

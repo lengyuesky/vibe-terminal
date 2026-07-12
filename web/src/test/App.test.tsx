@@ -52,6 +52,12 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+// 通过 设置 → 安全 分区打开 2FA 界面(替代原独立 Security 导航项)
+async function openSecuritySettings() {
+  await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  await userEvent.click(await screen.findByRole('tab', { name: 'Security' }));
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   mockedApi.getTwoFactorStatus.mockResolvedValue({ enabled: false, recoveryCodesRemaining: 0 });
@@ -543,10 +549,11 @@ describe('AppView', () => {
   it('通过可访问侧栏按钮打开Security并请求状态', async () => {
     render(<AppView {...loggedInAppViewProps()} />);
 
-    const security = screen.getByRole('button', { name: 'Security' });
-    expect(security.tagName).toBe('BUTTON');
-    security.focus();
+    const settings = screen.getByRole('button', { name: 'Settings' });
+    expect(settings.tagName).toBe('BUTTON');
+    settings.focus();
     await userEvent.keyboard('{Enter}');
+    await userEvent.click(await screen.findByRole('tab', { name: 'Security' }));
 
     expect(screen.getByRole('status', { name: 'Loading security settings' })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
@@ -565,7 +572,7 @@ describe('AppView', () => {
     const preventChunkError = (event: ErrorEvent) => event.preventDefault();
     window.addEventListener('error', preventChunkError);
     render(<AppView {...loggedInAppViewProps({ securityLoader })} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     expect(await screen.findByRole('alert')).toHaveTextContent('Security settings failed to load.');
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Terminals' })).toBeEnabled();
@@ -593,7 +600,7 @@ describe('AppView', () => {
     const second = screen.getByRole('tab', { name: /second/i });
     await userEvent.click(second);
     expect(second).toHaveAttribute('aria-selected', 'true');
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     await userEvent.click(screen.getByRole('button', { name: 'Terminals' }));
 
     expect(screen.getByRole('tab', { name: /second/i })).toHaveAttribute('aria-selected', 'true');
@@ -608,7 +615,7 @@ describe('AppView', () => {
     const name = screen.getByLabelText('Token name');
     await userEvent.clear(name);
     await userEvent.type(name, 'draft-agent');
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     expect(name).not.toBeVisible();
     await userEvent.click(screen.getByRole('button', { name: 'Agent Tokens' }));
 
@@ -639,14 +646,15 @@ describe('AppView', () => {
     );
 
     const terminals = screen.getByRole('button', { name: 'Terminals' });
-    const security = screen.getByRole('button', { name: 'Security' });
+    const settings = screen.getByRole('button', { name: 'Settings' });
     const agentTokens = screen.getByRole('button', { name: 'Agent Tokens' });
     expect(terminals).toHaveAttribute('aria-current', 'page');
     await userEvent.click(screen.getByRole('button', { name: /new terminal/i }));
     expect(await screen.findByRole('tab', { name: /sess-pre/i })).toBeInTheDocument();
 
-    await userEvent.click(security);
-    expect(security).toHaveAttribute('aria-current', 'page');
+    await userEvent.click(settings);
+    await userEvent.click(await screen.findByRole('tab', { name: 'Security' }));
+    expect(settings).toHaveAttribute('aria-current', 'page');
     expect(terminals).not.toHaveAttribute('aria-current');
     await userEvent.click(terminals);
     expect(screen.getByRole('tab', { name: /sess-pre/i })).toBeInTheDocument();
@@ -654,15 +662,16 @@ describe('AppView', () => {
     await userEvent.click(agentTokens);
     expect(agentTokens).toHaveAttribute('aria-current', 'page');
     expect(screen.getByText('preserved-token')).toBeInTheDocument();
-    await userEvent.click(security);
+    await userEvent.click(settings);
+    await userEvent.click(await screen.findByRole('tab', { name: 'Security' }));
     await userEvent.click(agentTokens);
     expect(screen.getByText('preserved-token')).toBeInTheDocument();
   });
 
-  it('未登录时不显示Security导航', () => {
+  it('未登录时不显示Settings导航', () => {
     render(<AppView {...loggedInAppViewProps({ user: null })} />);
 
-    expect(screen.queryByRole('button', { name: 'Security' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
   });
 
@@ -671,7 +680,7 @@ describe('AppView', () => {
     mockedApi.getTwoFactorStatus.mockReturnValue(status.promise);
     render(<AppView {...loggedInAppViewProps()} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     expect(screen.getByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Terminals' }));
     await act(async () => {
@@ -687,7 +696,7 @@ describe('AppView', () => {
   it('登出或切换用户后回到终端默认视图', async () => {
     const props = loggedInAppViewProps();
     const { rerender } = render(<AppView {...props} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     expect(await screen.findByRole('heading', { name: 'Two-factor security' })).toBeInTheDocument();
 
     rerender(<AppView {...props} user={null} />);
@@ -709,7 +718,7 @@ describe('AppView', () => {
     const props = loggedInAppViewProps();
     const { rerender } = render(<AppView {...props} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     await userEvent.click(await screen.findByRole('button', { name: 'Enable two-factor authentication' }));
     await userEvent.type(screen.getByLabelText('Current password'), 'secret-a');
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -736,7 +745,7 @@ describe('AppView', () => {
     });
     mockedApi.enableTwoFactor.mockReturnValue(recoveryRequest.promise);
     render(<AppView {...loggedInAppViewProps()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     await userEvent.click(await screen.findByRole('button', { name: 'Enable two-factor authentication' }));
     await userEvent.type(screen.getByLabelText('Current password'), 'secret');
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -745,10 +754,12 @@ describe('AppView', () => {
 
     expect(screen.getByRole('button', { name: 'Terminals' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Agent Tokens' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: 'General' })).toBeDisabled();
     expect(screen.getByText('DELIVERY-SECRET')).toBeInTheDocument();
     await act(async () => recoveryRequest.resolve(['DELIVERY-CODE']));
     expect(await screen.findByText('DELIVERY-CODE')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Terminals' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: 'General' })).toBeDisabled();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(screen.getByRole('button', { name: 'Terminals' })).toBeEnabled();
   });
@@ -758,7 +769,7 @@ describe('AppView', () => {
     mockedApi.getTwoFactorStatus.mockResolvedValue({ enabled: true, recoveryCodesRemaining: 3 });
     mockedApi.regenerateRecoveryCodes.mockReturnValue(request.promise);
     render(<AppView {...loggedInAppViewProps()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    await openSecuritySettings();
     await userEvent.click(await screen.findByRole('button', { name: 'Regenerate recovery codes' }));
     await userEvent.type(screen.getByLabelText('Current password'), 'secret');
     await userEvent.type(screen.getByLabelText('Authenticator code'), '654321');

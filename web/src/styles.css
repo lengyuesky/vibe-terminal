@@ -1682,3 +1682,25 @@ button.fileName:hover {
   padding: 0;
   overflow: visible;
 }
+
+/* ===== 登录页语言切换 ===== */
+.loginLangSwitch {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+
+.loginLangSwitch button {
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+}
+
+.loginLangSwitch button.active {
+  background: var(--accent-soft);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+}

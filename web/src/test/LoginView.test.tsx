@@ -1,8 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APIError, type LoginResult } from '../api';
 import { LoginView } from '../components/LoginView';
+import { LanguageProvider } from '../i18n';
 
 const challenge: LoginResult = {
   status: 'two_factor_required',
@@ -154,5 +155,38 @@ describe('LoginView', () => {
     await Promise.resolve();
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe('登录页语言切换', () => {
+  afterEach(() => {
+    window.localStorage.clear();
+    document.documentElement.lang = 'en';
+  });
+
+  it('默认英文,点击中文后界面即时切换', async () => {
+    render(
+      <LanguageProvider>
+        <LoginView onLogin={vi.fn()} onVerifyTwoFactor={vi.fn()} />
+      </LanguageProvider>
+    );
+    expect(screen.getByRole('button', { name: 'Login' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '中文' }));
+    expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument();
+    expect(screen.getByLabelText('用户名')).toBeInTheDocument();
+    expect(screen.getByLabelText('密码')).toBeInTheDocument();
+    expect(window.localStorage.getItem('vibe.lang')).toBe('zh');
+  });
+
+  it('切回英文恢复原文案', async () => {
+    window.localStorage.setItem('vibe.lang', 'zh');
+    render(
+      <LanguageProvider>
+        <LoginView onLogin={vi.fn()} onVerifyTwoFactor={vi.fn()} />
+      </LanguageProvider>
+    );
+    expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'EN' }));
+    expect(screen.getByRole('button', { name: 'Login' })).toBeInTheDocument();
   });
 });

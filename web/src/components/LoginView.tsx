@@ -1,13 +1,41 @@
 import { Terminal } from 'lucide-react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { APIError, type LoginResult } from '../api';
+import { useLang, useT } from '../i18n';
 
 type LoginViewProps = {
   onLogin: (username: string, password: string) => Promise<LoginResult>;
   onVerifyTwoFactor: (challengeToken: string, code: string) => Promise<void>;
 };
 
+// 登录页右上角语言切换:未登录用户也能切换界面语言
+function LoginLanguageSwitch() {
+  const { t } = useT();
+  const { lang, setLang } = useLang();
+  return (
+    <div className="loginLangSwitch" role="group" aria-label={t('login.languageLabel')}>
+      <button
+        type="button"
+        aria-pressed={lang === 'zh'}
+        className={lang === 'zh' ? 'active' : ''}
+        onClick={() => setLang('zh')}
+      >
+        中文
+      </button>
+      <button
+        type="button"
+        aria-pressed={lang === 'en'}
+        className={lang === 'en' ? 'active' : ''}
+        onClick={() => setLang('en')}
+      >
+        EN
+      </button>
+    </div>
+  );
+}
+
 export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
+  const { t } = useT();
   const [step, setStep] = useState<'password' | 'second_factor'>('password');
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
@@ -66,7 +94,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
       }
     } catch (caught) {
       if (!mountedRef.current || requestGeneration !== requestGenerationRef.current) return;
-      setError(errorMessage(caught, 'login failed'));
+      setError(errorMessage(caught, t('login.failed')));
     } finally {
       submittingRef.current = false;
       if (mountedRef.current && requestGeneration === requestGenerationRef.current) setSubmitting(false);
@@ -87,7 +115,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
       if (caught instanceof APIError && caught.code === 'login_restart_required') {
         clearSecondFactorState();
       }
-      setError(errorMessage(caught, 'two-factor verification failed'));
+      setError(errorMessage(caught, t('login.twoFactorFailed')));
     } finally {
       submittingRef.current = false;
       if (mountedRef.current && requestGeneration === requestGenerationRef.current) setSubmitting(false);
@@ -110,6 +138,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
 
   return (
     <main className="login">
+      <LoginLanguageSwitch />
       <form onSubmit={step === 'password' ? submitPassword : submitSecondFactor} className="loginForm">
         <h1 className="loginBrand">
           <Terminal size={22} aria-hidden="true" />
@@ -118,7 +147,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
         {step === 'password' ? (
           <>
             <label>
-              Username
+              {t('login.username')}
               <input
                 autoComplete="username"
                 disabled={submitting}
@@ -127,7 +156,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
               />
             </label>
             <label>
-              Password
+              {t('login.password')}
               <input
                 ref={passwordInputRef}
                 autoComplete="current-password"
@@ -142,14 +171,14 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
           </>
         ) : (
           <>
-            <h2>Two-factor authentication</h2>
+            <h2>{t('login.twoFactorTitle')}</h2>
             <p className="loginHint">
               {recoveryMode
-                ? 'Enter one of your saved recovery codes.'
-                : 'Enter the code from your authenticator app.'}
+                ? t('login.recoveryHint')
+                : t('login.authenticatorHint')}
             </p>
             <label>
-              {recoveryMode ? 'Recovery code' : 'Authenticator code'}
+              {recoveryMode ? t('login.recoveryCode') : t('login.authenticatorCode')}
               <input
                 ref={codeInputRef}
                 autoComplete="one-time-code"
@@ -162,10 +191,10 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
               />
             </label>
             <button type="button" disabled={submitting} onClick={toggleRecoveryMode}>
-              {recoveryMode ? 'Use an authenticator code' : 'Use a recovery code'}
+              {recoveryMode ? t('login.useAuthenticator') : t('login.useRecovery')}
             </button>
             <button className="loginBackButton" type="button" disabled={submitting} onClick={backToLogin}>
-              Back to login
+              {t('login.back')}
             </button>
           </>
         )}
@@ -175,7 +204,7 @@ export function LoginView({ onLogin, onVerifyTwoFactor }: LoginViewProps) {
           </p>
         )}
         <button type="submit" disabled={submitting || (step === 'second_factor' && !code.trim())}>
-          {step === 'password' ? 'Login' : 'Verify'}
+          {step === 'password' ? t('login.submit') : t('login.verify')}
         </button>
       </form>
     </main>

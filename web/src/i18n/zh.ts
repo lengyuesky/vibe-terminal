@@ -147,6 +147,10 @@ export const zh: Translation = {
   'search.close': '关闭搜索',
   'search.output': '搜索终端输出',
 
+  'terminal.connectionClosed': '终端连接已关闭。',
+  'terminal.connectionError': '终端连接错误。',
+  'terminal.connectedTo': '已连接到 {id}',
+
   'files.dialog': '{name} 上的文件',
   'files.title': '文件',
   'files.close': '关闭文件管理器',

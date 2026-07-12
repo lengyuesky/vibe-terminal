@@ -146,6 +146,10 @@ export const en = {
   'search.close': 'Close search',
   'search.output': 'Search terminal output',
 
+  'terminal.connectionClosed': 'Terminal connection closed.',
+  'terminal.connectionError': 'Terminal connection error.',
+  'terminal.connectedTo': 'connected to {id}',
+
   'files.dialog': 'Files on {name}',
   'files.title': 'Files',
   'files.close': 'Close file manager',

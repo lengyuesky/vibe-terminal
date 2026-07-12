@@ -2,6 +2,8 @@ import type { Dispatch, FormEvent, SetStateAction } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Pencil, X } from 'lucide-react';
 import type { Session } from '../api';
+import { useT } from '../i18n';
+import type { TFunction, TranslationKey } from '../i18n';
 import { SnippetsBar } from './SnippetsBar';
 import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 
@@ -16,8 +18,8 @@ function sessionDirectory(session: Session) {
   return session.working_directory || '$HOME';
 }
 
-function sessionDeviceName(session: Session) {
-  return session.device_name || session.device_id || 'Unknown device';
+function sessionDeviceName(session: Session, unknownDevice: string) {
+  return session.device_name || session.device_id || unknownDevice;
 }
 
 function shellName(shellPath: string) {
@@ -45,7 +47,22 @@ function statusClass(status: string) {
   }
 }
 
+const sessionStatusKeys: Partial<Record<string, TranslationKey>> = {
+  running: 'sessions.statusRunning',
+  starting: 'sessions.statusStarting',
+  lost: 'sessions.statusLost',
+  exited: 'sessions.statusExited',
+  closed: 'sessions.statusClosed',
+};
+
+// 已知状态翻译,未知状态原样显示
+function statusLabel(t: TFunction, status: string) {
+  const key = sessionStatusKeys[status];
+  return key ? t(key) : status;
+}
+
 export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRenameSession }: TerminalTabsProps) {
+  const { t } = useT();
   const [active, setActive] = useState<string | null>(sessions[0]?.id ?? null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmingClose, setConfirmingClose] = useState<string | null>(null);
@@ -135,7 +152,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
 
   const activeSession = visibleSessions.find((session) => session.id === active) ?? visibleSessions[0];
   if (visibleSessions.length === 0) {
-    return <main className="empty">No terminal session open</main>;
+    return <main className="empty">{t('sessions.empty')}</main>;
   }
   return (
     <main className="terminalArea">
@@ -144,7 +161,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
           const label = sessionLabel(session);
           const isPending = pendingSession === session.id;
           const directory = sessionDirectory(session);
-          const deviceName = sessionDeviceName(session);
+          const deviceName = sessionDeviceName(session, t('sessions.unknownDevice'));
           return (
             <div className="tabItem" key={session.id}>
               <button
@@ -166,7 +183,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                   <span className="tabSeparator" aria-hidden="true">
                     ·
                   </span>
-                  <span className={`statusBadge ${statusClass(session.status)}`}>{session.status}</span>
+                  <span className={`statusBadge ${statusClass(session.status)}`}>{statusLabel(t, session.status)}</span>
                   <span className="tabSeparator" aria-hidden="true">
                     ·
                   </span>
@@ -179,7 +196,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                 {renaming === session.id ? (
                   <form className="renameForm" onSubmit={(event) => submitRename(event, session)}>
                     <label>
-                      <span>Session title</span>
+                      <span>{t('sessions.title')}</span>
                       <input
                         autoFocus
                         value={draftTitle}
@@ -187,7 +204,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                         disabled={isPending}
                       />
                     </label>
-                    <button className="iconButton" type="submit" aria-label="Save" disabled={isPending || !draftTitle.trim()}>
+                    <button className="iconButton" type="submit" aria-label={t('common.save')} disabled={isPending || !draftTitle.trim()}>
                       <Check aria-hidden="true" size={14} />
                     </button>
                   </form>
@@ -195,7 +212,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                   <button
                     className="iconButton"
                     type="button"
-                    aria-label={`Rename ${label}`}
+                    aria-label={t('sessions.rename', { label })}
                     disabled={isPending}
                     onClick={() => startRename(session)}
                   >
@@ -207,7 +224,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                     <button
                       className="iconButton danger"
                       type="button"
-                      aria-label={`Confirm delete ${label}`}
+                      aria-label={t('sessions.confirmDelete', { label })}
                       disabled={isPending}
                       onClick={() => confirmCloseSession(session)}
                     >
@@ -216,7 +233,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                     <button
                       className="iconButton"
                       type="button"
-                      aria-label={`Cancel delete ${label}`}
+                      aria-label={t('sessions.cancelDelete', { label })}
                       disabled={isPending}
                       onClick={() => setConfirmingClose(null)}
                     >
@@ -227,7 +244,7 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
                   <button
                     className="iconButton danger"
                     type="button"
-                    aria-label={`Delete ${label}`}
+                    aria-label={t('sessions.delete', { label })}
                     disabled={isPending}
                     onClick={() => requestClose(session)}
                   >
@@ -243,10 +260,10 @@ export function TerminalTabs({ sessions, onSessionsChange, onCloseSession, onRen
         <div>
           <h1>
             <span>{sessionLabel(activeSession)}</span>
-            <span className="terminalDeviceBadge">{sessionDeviceName(activeSession)}</span>
+            <span className="terminalDeviceBadge">{sessionDeviceName(activeSession, t('sessions.unknownDevice'))}</span>
           </h1>
           <p>
-            {[activeSession.device_platform, sessionDirectory(activeSession), `session ${activeSession.id}`]
+            {[activeSession.device_platform, sessionDirectory(activeSession), t('sessions.meta', { id: activeSession.id })]
               .filter(Boolean)
               .join(' · ')}
           </p>

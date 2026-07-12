@@ -1,6 +1,7 @@
 import type { KeyboardEvent } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, X } from 'lucide-react';
+import { useT } from '../i18n';
 
 export type SearchQuery = { term: string; caseSensitive: boolean };
 
@@ -11,6 +12,7 @@ export function TerminalSearchBar({
   onSearch: (query: SearchQuery, direction: 'next' | 'previous') => void;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const [term, setTerm] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -34,15 +36,15 @@ export function TerminalSearchBar({
       <input
         ref={inputRef}
         value={term}
-        placeholder="Search"
-        aria-label="Search terminal"
+        placeholder={t('search.placeholder')}
+        aria-label={t('search.terminal')}
         onChange={(event) => setTerm(event.target.value)}
         onKeyDown={handleKeyDown}
       />
       <button
         className={caseSensitive ? 'iconButton searchCaseActive' : 'iconButton'}
         type="button"
-        aria-label="Match case"
+        aria-label={t('search.matchCase')}
         aria-pressed={caseSensitive}
         onClick={() => setCaseSensitive((current) => !current)}
       >
@@ -51,7 +53,7 @@ export function TerminalSearchBar({
       <button
         className="iconButton"
         type="button"
-        aria-label="Previous match"
+        aria-label={t('search.previous')}
         onClick={() => onSearch({ term, caseSensitive }, 'previous')}
       >
         <ArrowUp aria-hidden="true" size={14} />
@@ -59,12 +61,12 @@ export function TerminalSearchBar({
       <button
         className="iconButton"
         type="button"
-        aria-label="Next match"
+        aria-label={t('search.next')}
         onClick={() => onSearch({ term, caseSensitive }, 'next')}
       >
         <ArrowDown aria-hidden="true" size={14} />
       </button>
-      <button className="iconButton" type="button" aria-label="Close search" onClick={onClose}>
+      <button className="iconButton" type="button" aria-label={t('search.close')} onClick={onClose}>
         <X aria-hidden="true" size={14} />
       </button>
     </div>

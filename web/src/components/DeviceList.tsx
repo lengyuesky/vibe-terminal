@@ -2,6 +2,7 @@ import type { FormEvent } from 'react';
 import { useState } from 'react';
 import { Check, FolderOpen, Pencil, Terminal, X } from 'lucide-react';
 import type { Device } from '../api';
+import { useT } from '../i18n';
 
 export function DeviceList({
   devices,
@@ -19,6 +20,7 @@ export function DeviceList({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [pendingDevice, setPendingDevice] = useState<string | null>(null);
+  const { t } = useT();
 
   function startRename(device: Device) {
     setRenaming(device.id);
@@ -40,7 +42,7 @@ export function DeviceList({
 
   return (
     <section className={compact ? 'devicesPanel compact' : 'devices'}>
-      <h2>Devices</h2>
+      <h2>{t('devices.title')}</h2>
       {devices.map((device) => {
         const isPending = pendingDevice === device.id;
         return (
@@ -49,7 +51,7 @@ export function DeviceList({
               {renaming === device.id ? (
                 <form className="renameForm deviceRenameForm" onSubmit={(event) => submitRename(event, device)}>
                   <label>
-                    <span>Device name</span>
+                    <span>{t('devices.name')}</span>
                     <input
                       autoFocus
                       value={draftName}
@@ -60,7 +62,7 @@ export function DeviceList({
                   <button
                     className="iconButton"
                     type="submit"
-                    aria-label="Save device name"
+                    aria-label={t('devices.saveName')}
                     disabled={isPending || !draftName.trim()}
                   >
                     <Check aria-hidden="true" size={14} />
@@ -68,7 +70,7 @@ export function DeviceList({
                   <button
                     className="iconButton"
                     type="button"
-                    aria-label={`Cancel rename ${device.name}`}
+                    aria-label={t('devices.cancelRename', { name: device.name })}
                     disabled={isPending}
                     onClick={() => setRenaming(null)}
                   >
@@ -82,13 +84,15 @@ export function DeviceList({
                 </>
               )}
             </div>
-            <span className={device.online ? 'online' : 'offline'}>{device.online ? 'online' : 'offline'}</span>
+            <span className={device.online ? 'online' : 'offline'}>
+              {device.online ? t('devices.online') : t('devices.offline')}
+            </span>
             <div className="deviceActions">
               {onRenameDevice && renaming !== device.id && (
                 <button
                   className="iconButton"
                   type="button"
-                  aria-label={`Rename ${device.name}`}
+                  aria-label={t('devices.rename', { name: device.name })}
                   disabled={isPending}
                   onClick={() => startRename(device)}
                 >
@@ -99,7 +103,7 @@ export function DeviceList({
                 <button
                   className="iconButton"
                   type="button"
-                  aria-label={`Browse files on ${device.name}`}
+                  aria-label={t('devices.browseFiles', { name: device.name })}
                   disabled={!device.online || isPending}
                   onClick={() => onOpenFiles(device)}
                 >
@@ -108,7 +112,7 @@ export function DeviceList({
               )}
               <button disabled={!device.online || isPending} onClick={() => onCreateSession(device.id)}>
                 <Terminal size={16} aria-hidden="true" />
-                New terminal
+                {t('devices.newTerminal')}
               </button>
             </div>
           </section>

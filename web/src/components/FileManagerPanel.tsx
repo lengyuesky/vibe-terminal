@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react';
 import { ArrowUp, Download, File as FileIcon, Folder, RefreshCw, Upload, X } from 'lucide-react';
 import type { Device, FsEntry } from '../api';
 import * as api from '../api';
+import { useT } from '../i18n';
 
 function formatSize(size: number): string {
   if (size < 1024) return `${size} B`;
@@ -42,6 +43,7 @@ function breadcrumbSegments(path: string): Array<{ label: string; target: string
 }
 
 export function FileManagerPanel({ device, onClose }: { device: Device; onClose: () => void }) {
+  const { t } = useT();
   const [path, setPath] = useState('~');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -58,11 +60,13 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
         setPath(listing.path);
         setEntries(listing.entries ?? []);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to list directory');
+        setError(err instanceof Error ? err.message : t('files.errList'));
       } finally {
         setLoading(false);
       }
     },
+    // 故意不把 t 加入依赖:否则切换语言会重建 load 并触发 useEffect,把目录重置回 ~。
+    // 代价仅是切换语言前已产生的错误消息保持旧语言,可接受。
     [device.id]
   );
 
@@ -92,12 +96,12 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
     } catch (err) {
       setUploadProgress(null);
       if (err instanceof api.UploadError && err.status === 409 && !overwrite) {
-        if (window.confirm(`${file.name} already exists. Overwrite?`)) {
+        if (window.confirm(t('files.overwrite', { name: file.name }))) {
           await uploadFile(file, true);
         }
         return;
       }
-      setError(err instanceof Error ? err.message : 'Upload failed');
+      setError(err instanceof Error ? err.message : t('files.errUpload'));
     }
   }
 
@@ -110,15 +114,15 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
   }
 
   return (
-    <div className="filePanelOverlay" role="dialog" aria-label={`Files on ${device.name}`}>
+    <div className="filePanelOverlay" role="dialog" aria-label={t('files.dialog', { name: device.name })}>
       <section className="filePanel">
         <header className="filePanelHeader">
           <h2>
             <Folder size={16} aria-hidden="true" />
-            <span>Files</span>
+            <span>{t('files.title')}</span>
             <span className="filePanelDevice">{device.name}</span>
           </h2>
-          <button className="iconButton" type="button" aria-label="Close file manager" onClick={onClose}>
+          <button className="iconButton" type="button" aria-label={t('files.close')} onClick={onClose}>
             <X aria-hidden="true" size={16} />
           </button>
         </header>
@@ -126,13 +130,13 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
           <button
             className="iconButton"
             type="button"
-            aria-label="Parent directory"
+            aria-label={t('files.parent')}
             disabled={loading || path === '/'}
             onClick={() => void load(parentPath(path))}
           >
             <ArrowUp aria-hidden="true" size={14} />
           </button>
-          <nav className="fileBreadcrumbs" aria-label="Current path">
+          <nav className="fileBreadcrumbs" aria-label={t('files.path')}>
             {breadcrumbSegments(path).map((segment) => (
               <button
                 key={segment.target}
@@ -147,7 +151,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
           <button
             className="iconButton"
             type="button"
-            aria-label="Refresh"
+            aria-label={t('common.refresh')}
             disabled={loading}
             onClick={() => void load(path)}
           >
@@ -156,7 +160,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
           <button
             className="iconButton"
             type="button"
-            aria-label="Upload"
+            aria-label={t('files.upload')}
             disabled={loading || uploadProgress !== null}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -165,7 +169,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
           <input
             ref={fileInputRef}
             type="file"
-            aria-label="Upload file"
+            aria-label={t('files.uploadFile')}
             className="fileUploadInput"
             onChange={handleFileChosen}
           />
@@ -187,7 +191,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
                 <button
                   className="fileName"
                   type="button"
-                  aria-label={`Open ${entry.name}`}
+                  aria-label={t('files.open', { name: entry.name })}
                   onClick={() => void load(joinPath(path, entry.name))}
                 >
                   <Folder aria-hidden="true" size={14} />
@@ -206,7 +210,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
                   <button
                     className="iconButton"
                     type="button"
-                    aria-label={`Download ${entry.name}`}
+                    aria-label={t('files.download', { name: entry.name })}
                     onClick={() => downloadEntry(entry)}
                   >
                     <Download aria-hidden="true" size={14} />
@@ -215,7 +219,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
               </span>
             </div>
           ))}
-          {!loading && !error && entries.length === 0 && <div className="fileEmpty">Empty directory</div>}
+          {!loading && !error && entries.length === 0 && <div className="fileEmpty">{t('files.empty')}</div>}
         </div>
       </section>
     </div>

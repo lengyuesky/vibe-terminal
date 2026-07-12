@@ -3,11 +3,14 @@ import { useEffect, useState } from 'react';
 import { ChevronDown, Pencil, Plus, Trash2, Zap } from 'lucide-react';
 import type { Snippet } from '../api';
 import * as api from '../api';
+import { useT } from '../i18n';
+import type { TranslationKey } from '../i18n';
 
 export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [snippets, setSnippets] = useState<Snippet[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<TranslationKey | null>(null);
   const [editing, setEditing] = useState<Snippet | null>(null);
   const [draftName, setDraftName] = useState('');
   const [draftCommand, setDraftCommand] = useState('');
@@ -25,7 +28,7 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
         }
       })
       .catch(() => {
-        if (!cancelled) setError('Failed to load snippets.');
+        if (!cancelled) setError('snippets.errLoad');
       });
     return () => {
       cancelled = true;
@@ -65,7 +68,7 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
       }
       resetForm();
     } catch {
-      setError('Failed to save snippet.');
+      setError('snippets.errSave');
     } finally {
       setPending(false);
     }
@@ -77,7 +80,7 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
       await api.deleteSnippet(snippet.id);
       setSnippets((current) => current.filter((item) => item.id !== snippet.id));
     } catch {
-      setError('Failed to delete snippet.');
+      setError('snippets.errDelete');
     }
   }
 
@@ -90,24 +93,24 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
         onClick={() => setOpen((current) => !current)}
       >
         <Zap size={14} aria-hidden="true" />
-        <span>Quick commands</span>
+        <span>{t('snippets.toggle')}</span>
         <ChevronDown size={14} aria-hidden="true" />
       </button>
       {open && (
         <div className="snippetsPopover">
           {error && (
             <div className="snippetsError" role="alert">
-              {error}
+              {t(error)}
             </div>
           )}
-          {!error && snippets.length === 0 && <div className="snippetsEmpty">No snippets yet</div>}
+          {!error && snippets.length === 0 && <div className="snippetsEmpty">{t('snippets.empty')}</div>}
           <ul className="snippetsList">
             {snippets.map((snippet) => (
               <li key={snippet.id} className="snippetRow">
                 <button
                   className="snippetInsert"
                   type="button"
-                  aria-label={`Insert ${snippet.name}`}
+                  aria-label={t('snippets.insert', { name: snippet.name })}
                   title={snippet.command}
                   onClick={() => insert(snippet)}
                 >
@@ -117,7 +120,7 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
                 <button
                   className="iconButton"
                   type="button"
-                  aria-label={`Edit ${snippet.name}`}
+                  aria-label={t('snippets.edit', { name: snippet.name })}
                   onClick={() => startEdit(snippet)}
                 >
                   <Pencil aria-hidden="true" size={13} />
@@ -125,7 +128,7 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
                 <button
                   className="iconButton danger"
                   type="button"
-                  aria-label={`Delete ${snippet.name}`}
+                  aria-label={t('snippets.delete', { name: snippet.name })}
                   onClick={() => void remove(snippet)}
                 >
                   <Trash2 aria-hidden="true" size={13} />
@@ -136,29 +139,29 @@ export function SnippetsBar({ onInsert }: { onInsert: (command: string) => void 
           <form className="snippetForm" onSubmit={submit}>
             <input
               value={draftName}
-              placeholder="Name"
-              aria-label="Snippet name"
+              placeholder={t('snippets.namePlaceholder')}
+              aria-label={t('snippets.nameLabel')}
               disabled={pending}
               onChange={(event) => setDraftName(event.target.value)}
             />
             <input
               value={draftCommand}
-              placeholder="Command"
-              aria-label="Snippet command"
+              placeholder={t('snippets.commandPlaceholder')}
+              aria-label={t('snippets.commandLabel')}
               disabled={pending}
               onChange={(event) => setDraftCommand(event.target.value)}
             />
             <button type="submit" disabled={pending || !draftName.trim() || !draftCommand.trim()}>
               <Plus size={14} aria-hidden="true" />
-              {editing ? 'Save' : 'Add'}
+              {editing ? t('common.save') : t('common.add')}
             </button>
             {editing && (
               <button type="button" disabled={pending} onClick={resetForm}>
-                Cancel
+                {t('common.cancel')}
               </button>
             )}
           </form>
-          <p className="snippetsHint">Click a snippet to type it into the active terminal, then press Enter yourself.</p>
+          <p className="snippetsHint">{t('snippets.hint')}</p>
         </div>
       )}
     </div>

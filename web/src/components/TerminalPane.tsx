@@ -5,6 +5,7 @@ import { SearchAddon } from 'xterm-addon-search';
 import { Search } from 'lucide-react';
 import 'xterm/css/xterm.css';
 import * as api from '../api';
+import { useT } from '../i18n';
 import { encodeResize, encodeStdin, encodeSubscribe, webSocketURL, type TerminalEvent } from '../ws';
 import { TerminalSearchBar, type SearchQuery } from './TerminalSearchBar';
 
@@ -23,6 +24,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
   ref
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { t } = useT();
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -184,17 +186,17 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
           if (cancelled) {
             return;
           }
-          setConnectionMessage('Terminal connection closed.');
+          setConnectionMessage(t('terminal.connectionClosed'));
         });
         socket.addEventListener('error', () => {
           if (cancelled) {
             return;
           }
-          setConnectionMessage('Terminal connection error.');
+          setConnectionMessage(t('terminal.connectionError'));
         });
       }
     } catch {
-      containerRef.current.textContent = `connected to ${sessionId}`;
+      containerRef.current.textContent = t('terminal.connectedTo', { id: sessionId });
     }
 
     return () => {
@@ -205,6 +207,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       searchAddonRef.current = null;
       terminal?.dispose();
     };
+    // t 以闭包捕获,故意不加入依赖:避免语言切换销毁并重连终端(同 FileManagerPanel.load)。
   }, [sessionId, readOnly, onSessionStateChange]);
 
   useImperativeHandle(
@@ -253,7 +256,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
           <button
             className="iconButton"
             type="button"
-            aria-label="Search terminal output"
+            aria-label={t('search.output')}
             onClick={() => setSearchOpen(true)}
           >
             <Search aria-hidden="true" size={14} />

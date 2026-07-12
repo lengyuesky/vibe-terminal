@@ -35,3 +35,20 @@ Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
     clip: () => undefined,
   }),
 });
+
+// jsdom 不实现 matchMedia;默认按桌面(不匹配移动断点)
+if (typeof window !== 'undefined' && !window.matchMedia) {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  });
+}

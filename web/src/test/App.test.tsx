@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, AppView, useAgentTokenState } from '../App';
 import { StrictMode, useEffect } from 'react';
 import * as api from '../api';
@@ -1032,5 +1032,119 @@ describe('AppView', () => {
     });
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe('移动端布局', () => {
+  const realMatchMedia = window.matchMedia;
+  afterEach(() => {
+    window.matchMedia = realMatchMedia;
+  });
+
+  type MediaListener = (event: MediaQueryListEvent) => void;
+
+  // 可控的 matchMedia 替身:setMatches 可模拟视口宽窄切换
+  function installMatchMedia(initialMatches: boolean) {
+    const listeners = new Set<MediaListener>();
+    let matches = initialMatches;
+    const mediaQueryList = {
+      get matches() {
+        return matches;
+      },
+      media: '(max-width: 760px)',
+      onchange: null,
+      addEventListener: (_type: string, listener: MediaListener) => {
+        listeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: MediaListener) => {
+        listeners.delete(listener);
+      },
+      addListener: (listener: MediaListener) => {
+        listeners.add(listener);
+      },
+      removeListener: (listener: MediaListener) => {
+        listeners.delete(listener);
+      },
+      dispatchEvent: () => false,
+    };
+    window.matchMedia = (() => mediaQueryList) as unknown as typeof window.matchMedia;
+    return {
+      setMatches(next: boolean) {
+        matches = next;
+        listeners.forEach((listener) => listener({ matches: next } as MediaQueryListEvent));
+      },
+    };
+  }
+
+  const device = { id: 'dev-1', name: 'MacBook', platform: 'darwin', online: true };
+
+  it('移动端渲染底部标签栏,桌面侧栏不渲染', () => {
+    installMatchMedia(true);
+    render(<AppView {...loggedInAppViewProps({ devices: [device] })} />);
+    const tabBar = screen.getByRole('navigation', { name: 'Primary' });
+    expect(tabBar).toHaveClass('mobileTabBar');
+    expect(within(tabBar).getByRole('button', { name: 'Devices' })).toBeInTheDocument();
+    expect(within(tabBar).getByRole('button', { name: 'Terminals' })).toBeInTheDocument();
+    expect(within(tabBar).getByRole('button', { name: 'Agent Tokens' })).toBeInTheDocument();
+    expect(within(tabBar).getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    // 桌面侧栏的品牌区不渲染(移动端品牌在设备视图内,初始隐藏)
+    expect(screen.queryByRole('heading', { name: 'Devices' })).not.toBeInTheDocument();
+  });
+
+  it('设备 tab 显示设备列表,新建会话后自动切回终端视图', async () => {
+    installMatchMedia(true);
+    const session = {
+      id: 'sess-1',
+      title: 'shell',
+      status: 'running',
+      device_id: 'dev-1',
+    };
+    const onCreateSession = vi.fn().mockResolvedValue(session);
+    render(<AppView {...loggedInAppViewProps({ devices: [device], onCreateSession })} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Devices' }));
+    expect(screen.getByRole('heading', { name: 'Devices' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'New terminal' }));
+    expect(onCreateSession).toHaveBeenCalledWith('dev-1');
+    // 自动切回终端视图:激活的 tab 是 Terminals,且会话标签出现
+    expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page');
+    expect(await screen.findByRole('tab', { selected: true })).toBeInTheDocument();
+  });
+
+  it('视口变宽时设备视图回退为终端视图并恢复侧栏', async () => {
+    const media = installMatchMedia(true);
+    render(<AppView {...loggedInAppViewProps({ devices: [device] })} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Devices' }));
+    act(() => media.setMatches(false));
+    // 桌面侧栏出现(设备标题可见),Terminals 导航激活,tab bar 消失
+    expect(screen.getByRole('heading', { name: 'Devices' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Terminals' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: 'Devices' })).not.toBeInTheDocument();
+  });
+
+  it('恢复码交付锁定期间移动端 tab 禁用(设置除外)', async () => {
+    installMatchMedia(true);
+    const recoveryRequest = deferred<string[]>();
+    mockedApi.startTwoFactorSetup.mockResolvedValue({
+      manualKey: 'MOBILE-SECRET',
+      otpauthURI: 'otpauth://totp/example?secret=MOBILE-SECRET',
+      expiresAt: '',
+    });
+    mockedApi.enableTwoFactor.mockReturnValue(recoveryRequest.promise);
+    render(<AppView {...loggedInAppViewProps()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await userEvent.click(await screen.findByRole('tab', { name: 'Security' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Enable two-factor authentication' }));
+    await userEvent.type(screen.getByLabelText('Current password'), 'secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await userEvent.type(await screen.findByLabelText('Authenticator code'), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Enable two-factor authentication' }));
+    const tabBar = screen.getByRole('navigation', { name: 'Primary' });
+    expect(within(tabBar).getByRole('button', { name: 'Devices' })).toBeDisabled();
+    expect(within(tabBar).getByRole('button', { name: 'Terminals' })).toBeDisabled();
+    expect(within(tabBar).getByRole('button', { name: 'Agent Tokens' })).toBeDisabled();
+    expect(within(tabBar).getByRole('button', { name: 'Settings' })).toBeEnabled();
+    await act(async () => recoveryRequest.resolve(['MOBILE-CODE']));
+    await userEvent.click(await screen.findByRole('button', { name: 'Done' }));
+    expect(within(tabBar).getByRole('button', { name: 'Terminals' })).toBeEnabled();
   });
 });

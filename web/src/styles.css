@@ -1243,18 +1243,6 @@ input:focus-visible {
   box-shadow: var(--glass-shadow), var(--glass-highlight);
 }
 
-@media (max-width: 760px) {
-  .shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    height: 100dvh;
-  }
-
-  .devices {
-    overflow-y: visible;
-  }
-}
-
 /* 文件管理器抽屉 */
 .filePanelOverlay {
   position: fixed;
@@ -1704,3 +1692,79 @@ button.fileName:hover {
   border-color: rgba(167, 139, 250, 0.45);
   color: #ddd6fe;
 }
+
+/* ===== 移动端布局 ===== */
+/* 底部标签栏(仅移动端由 JS 渲染) */
+.mobileTabBar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  border-radius: var(--r-card);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+.mobileTabBar button {
+  flex: 1;
+  min-height: 48px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 11px;
+  border-radius: 10px;
+}
+
+.mobileTabBar button.active {
+  background: var(--accent-soft);
+  color: #ddd6fe;
+}
+
+/* 移动端整体两行布局:内容区 + 底部标签栏 */
+.shell.mobileShell {
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100dvh;
+  padding: 8px;
+  gap: 8px;
+}
+
+.shell.mobileShell .settingsPage {
+  padding: 16px;
+}
+
+/* 移动端设备视图:品牌 + 设备列表,可纵向滚动 */
+.mobileDevicesPane {
+  min-height: 0;
+  overflow-y: auto;
+  display: block;
+}
+
+.mobileDevicesPane .brand {
+  padding: 4px 4px 12px;
+}
+
+/* 移动端触控目标:设备操作按钮加高 */
+.mobileDevicesPane .deviceActions button {
+  min-height: 44px;
+}
+
+.mobileDevicesPane .iconButton {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* 移动端文件管理器抽屉全宽 */
+@media (max-width: 760px) {
+  .filePanel {
+    width: 100%;
+    margin: 0;
+    border-radius: 0;
+  }
+}
+

@@ -1,5 +1,6 @@
-import { KeyRound, Monitor, Settings, Terminal } from 'lucide-react';
+import { KeyRound, Monitor, Server, Settings, Terminal } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { AgentToken, CreatedAgentToken, Device, LoginResult, Session, User } from './api';
 import * as api from './api';
 import { AgentTokenManager } from './components/AgentTokenManager';
@@ -120,6 +121,21 @@ function enrichSessionDevice(session: Session, deviceId: string, device?: Device
     device_name: device?.name ?? session.device_name,
     device_platform: device?.platform ?? session.device_platform,
   };
+}
+
+const MOBILE_QUERY = '(max-width: 760px)';
+
+// 监听移动断点;与 CSS 的 760px 保持一致
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
+  useEffect(() => {
+    const query = window.matchMedia(MOBILE_QUERY);
+    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
+    query.addEventListener('change', onChange);
+    setIsMobile(query.matches);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return isMobile;
 }
 
 export function App() {
@@ -261,6 +277,42 @@ export function AppView(props: AppViewProps) {
   return <AuthenticatedAppView key={props.user.id} {...props} user={props.user} />;
 }
 
+// 移动端底部导航:设备 / 终端 / 令牌 / 设置
+function MobileTabBar({
+  viewMode,
+  locked,
+  onSelect,
+}: {
+  viewMode: ViewMode;
+  locked: boolean;
+  onSelect: (mode: ViewMode) => void;
+}) {
+  const { t } = useT();
+  const items: Array<{ mode: ViewMode; label: string; icon: ReactNode }> = [
+    { mode: 'devices', label: t('nav.devices'), icon: <Server size={18} aria-hidden="true" /> },
+    { mode: 'terminals', label: t('nav.terminals'), icon: <Monitor size={18} aria-hidden="true" /> },
+    { mode: 'agentTokens', label: t('nav.agentTokens'), icon: <KeyRound size={18} aria-hidden="true" /> },
+    { mode: 'settings', label: t('nav.settings'), icon: <Settings size={18} aria-hidden="true" /> },
+  ];
+  return (
+    <nav className="mobileTabBar" aria-label={t('nav.primary')}>
+      {items.map((item) => (
+        <button
+          key={item.mode}
+          type="button"
+          disabled={locked && item.mode !== 'settings'}
+          aria-current={viewMode === item.mode ? 'page' : undefined}
+          className={viewMode === item.mode ? 'active' : ''}
+          onClick={() => onSelect(item.mode)}
+        >
+          {item.icon}
+          <span>{item.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 function AuthenticatedAppView({
   devices,
   sessions,
@@ -293,6 +345,12 @@ function AuthenticatedAppView({
   const [viewMode, setViewMode] = useState<ViewMode>('terminals');
   const [filesDevice, setFilesDevice] = useState<Device | null>(null);
   const [securityDeliveryLocked, setSecurityDeliveryLocked] = useState(false);
+  const isMobile = useIsMobile();
+
+  // 离开移动断点时,设备视图在桌面端不存在,回退到终端
+  useEffect(() => {
+    if (!isMobile && viewMode === 'devices') setViewMode('terminals');
+  }, [isMobile, viewMode]);
 
   useEffect(() => {
     setLocalDevices(devices);
@@ -307,6 +365,7 @@ function AuthenticatedAppView({
     if (session) {
       const device = localDevices.find((item) => item.id === deviceId);
       setLocalSessions((current) => [...current, enrichSessionDevice(session, deviceId, device)]);
+      if (isMobile) setViewMode('terminals'); // 移动端:新建会话后跳回终端视图
     }
   }
 
@@ -326,51 +385,53 @@ function AuthenticatedAppView({
   }
 
   return (
-    <div className="shell">
-      <aside className="devices">
-        <div className="brand">
-          <Terminal size={18} aria-hidden="true" />
-          <span>vibe-terminal</span>
-        </div>
-        <nav className="sideNav" aria-label={t('nav.primary')}>
-          <button
-            type="button"
-            disabled={securityDeliveryLocked}
-            aria-current={viewMode === 'terminals' ? 'page' : undefined}
-            className={viewMode === 'terminals' ? 'active' : ''}
-            onClick={() => setViewMode('terminals')}
-          >
-            <Monitor size={16} aria-hidden="true" />
-            {t('nav.terminals')}
-          </button>
-          <button
-            type="button"
-            disabled={securityDeliveryLocked}
-            aria-current={viewMode === 'agentTokens' ? 'page' : undefined}
-            className={viewMode === 'agentTokens' ? 'active' : ''}
-            onClick={() => setViewMode('agentTokens')}
-          >
-            <KeyRound size={16} aria-hidden="true" />
-            {t('nav.agentTokens')}
-          </button>
-          <button
-            type="button"
-            aria-current={viewMode === 'settings' ? 'page' : undefined}
-            className={viewMode === 'settings' ? 'active' : ''}
-            onClick={() => setViewMode('settings')}
-          >
-            <Settings size={16} aria-hidden="true" />
-            {t('nav.settings')}
-          </button>
-        </nav>
-        <DeviceList
-          devices={localDevices}
-          onCreateSession={createAndAppend}
-          onRenameDevice={renameDeviceAndApply}
-          onOpenFiles={setFilesDevice}
-          compact
-        />
-      </aside>
+    <div className={isMobile ? 'shell mobileShell' : 'shell'}>
+      {!isMobile && (
+        <aside className="devices">
+          <div className="brand">
+            <Terminal size={18} aria-hidden="true" />
+            <span>vibe-terminal</span>
+          </div>
+          <nav className="sideNav" aria-label={t('nav.primary')}>
+            <button
+              type="button"
+              disabled={securityDeliveryLocked}
+              aria-current={viewMode === 'terminals' ? 'page' : undefined}
+              className={viewMode === 'terminals' ? 'active' : ''}
+              onClick={() => setViewMode('terminals')}
+            >
+              <Monitor size={16} aria-hidden="true" />
+              {t('nav.terminals')}
+            </button>
+            <button
+              type="button"
+              disabled={securityDeliveryLocked}
+              aria-current={viewMode === 'agentTokens' ? 'page' : undefined}
+              className={viewMode === 'agentTokens' ? 'active' : ''}
+              onClick={() => setViewMode('agentTokens')}
+            >
+              <KeyRound size={16} aria-hidden="true" />
+              {t('nav.agentTokens')}
+            </button>
+            <button
+              type="button"
+              aria-current={viewMode === 'settings' ? 'page' : undefined}
+              className={viewMode === 'settings' ? 'active' : ''}
+              onClick={() => setViewMode('settings')}
+            >
+              <Settings size={16} aria-hidden="true" />
+              {t('nav.settings')}
+            </button>
+          </nav>
+          <DeviceList
+            devices={localDevices}
+            onCreateSession={createAndAppend}
+            onRenameDevice={renameDeviceAndApply}
+            onOpenFiles={setFilesDevice}
+            compact
+          />
+        </aside>
+      )}
       <div className="viewPane" hidden={viewMode !== 'terminals'} aria-hidden={viewMode !== 'terminals'}>
         <TerminalTabs
           sessions={localSessions}
@@ -391,12 +452,33 @@ function AuthenticatedAppView({
           onRefresh={onRefreshAgentTokens}
         />
       </div>
+      {isMobile && (
+        <div
+          className="viewPane mobileDevicesPane"
+          hidden={viewMode !== 'devices'}
+          aria-hidden={viewMode !== 'devices'}
+        >
+          <div className="brand">
+            <Terminal size={18} aria-hidden="true" />
+            <span>vibe-terminal</span>
+          </div>
+          <DeviceList
+            devices={localDevices}
+            onCreateSession={createAndAppend}
+            onRenameDevice={renameDeviceAndApply}
+            onOpenFiles={setFilesDevice}
+          />
+        </div>
+      )}
       {viewMode === 'settings' && (
         <SettingsView
           securityLoader={securityLoader}
           onRecoveryDeliveryLockChange={setSecurityDeliveryLocked}
           deliveryLocked={securityDeliveryLocked}
         />
+      )}
+      {isMobile && (
+        <MobileTabBar viewMode={viewMode} locked={securityDeliveryLocked} onSelect={setViewMode} />
       )}
       {filesDevice && <FileManagerPanel device={filesDevice} onClose={() => setFilesDevice(null)} />}
     </div>

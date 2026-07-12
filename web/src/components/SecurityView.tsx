@@ -10,6 +10,7 @@ import {
   type TwoFactorSetup,
   type TwoFactorStatus,
 } from '../api';
+import { useT } from '../i18n';
 
 type SecurityStep =
   | 'overview'
@@ -20,6 +21,7 @@ type SecurityStep =
   | 'disable';
 
 export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRecoveryDeliveryLockChange?: (locked: boolean) => void }) {
+  const { t } = useT();
   const [step, setStep] = useState<SecurityStep>('overview');
   const [status, setStatus] = useState<TwoFactorStatus | null>(null);
   const [password, setPassword] = useState('');
@@ -88,7 +90,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       if (isCurrentRequest(generation)) setStatus(result);
     } catch (caught) {
       if (isCurrentRequest(generation)) {
-        setError(caught instanceof Error ? caught.message : 'Failed to load two-factor status.');
+        setError(caught instanceof Error ? caught.message : t('security.errStatus'));
       }
     } finally {
       finishRequest(generation);
@@ -140,7 +142,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       setStep('setup_confirm');
     } catch (caught) {
       if (isCurrentRequest(generation)) {
-        setError(caught instanceof Error ? caught.message : 'Failed to start two-factor setup.');
+        setError(caught instanceof Error ? caught.message : t('security.errSetup'));
       }
     } finally {
       finishRequest(generation);
@@ -169,7 +171,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
           clearSensitiveState();
           setStep('enable_password');
         }
-        setError(caught instanceof Error ? caught.message : 'Failed to enable two-factor authentication.');
+        setError(caught instanceof Error ? caught.message : t('security.errEnable'));
       }
     } finally {
       finishRequest(generation);
@@ -193,7 +195,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
     } catch (caught) {
       if (isCurrentRequest(generation)) {
         onRecoveryDeliveryLockChange(false);
-        setError(caught instanceof Error ? caught.message : 'Failed to regenerate recovery codes.');
+        setError(caught instanceof Error ? caught.message : t('security.errRegenerate'));
       }
     } finally {
       finishRequest(generation);
@@ -213,7 +215,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       setStep('overview');
     } catch (caught) {
       if (isCurrentRequest(generation)) {
-        setError(caught instanceof Error ? caught.message : 'Failed to disable two-factor authentication.');
+        setError(caught instanceof Error ? caught.message : t('security.errDisable'));
       }
     } finally {
       finishRequest(generation);
@@ -239,7 +241,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       await navigator.clipboard.writeText(recoveryCodes.join('\n'));
     } catch (caught) {
       if (isCurrentCopy(generation)) {
-        setError('Failed to copy recovery codes.');
+        setError(t('security.errCopy'));
       }
     } finally {
       if (isCurrentCopy(generation)) {
@@ -262,7 +264,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       document.body.append(link);
       link.click();
     } catch {
-      setError('Failed to download recovery codes.');
+      setError(t('security.errDownload'));
     } finally {
       link?.remove();
       if (objectURL) {
@@ -275,7 +277,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
   return (
     <section aria-labelledby="security-title">
       <h1 id="security-title" ref={titleRef} tabIndex={-1}>
-        Two-factor security
+        {t('security.title')}
       </h1>
       {error && (
         <p id="security-error" role="alert" className="error">
@@ -284,28 +286,28 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       )}
       {step === 'overview' && !status && error && (
         <button type="button" disabled={loading} onClick={() => void loadStatus()}>
-          Retry loading status
+          {t('security.retryStatus')}
         </button>
       )}
 
       {step === 'overview' && status && (
         <>
           <p>
-            Two-factor authentication is {status.enabled ? 'enabled' : 'disabled'}.
+            {status.enabled ? t('security.statusEnabled') : t('security.statusDisabled')}
           </p>
           {status.enabled ? (
             <>
-              <p>{status.recoveryCodesRemaining} recovery codes remaining.</p>
+              <p>{t('security.recoveryRemaining', { count: status.recoveryCodesRemaining })}</p>
               <button type="button" disabled={loading} onClick={() => openStep('regenerate')}>
-                Regenerate recovery codes
+                {t('security.regenerate')}
               </button>
               <button type="button" disabled={loading} onClick={() => openStep('disable')}>
-                Disable two-factor authentication
+                {t('security.disable')}
               </button>
             </>
           ) : (
             <button type="button" disabled={loading} onClick={() => openStep('enable_password')}>
-              Enable two-factor authentication
+              {t('security.enable')}
             </button>
           )}
         </>
@@ -314,7 +316,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       {step === 'enable_password' && (
         <form onSubmit={submitSetup}>
           <label>
-            Current password
+            {t('security.currentPassword')}
             <input
               aria-describedby={error ? 'security-error' : undefined}
               aria-invalid={error ? true : undefined}
@@ -327,21 +329,21 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading || !password.trim()}>Continue</button>
+          <button type="submit" disabled={loading || !password.trim()}>{t('common.continue')}</button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
 
       {step === 'setup_confirm' && setup && (
         <form onSubmit={submitEnable}>
-          <h2>Scan the QR code</h2>
-          <QRCodeSVG aria-label="Two-factor setup QR code" role="img" value={setup.otpauthURI} />
+          <h2>{t('security.scanQr')}</h2>
+          <QRCodeSVG aria-label={t('security.qrLabel')} role="img" value={setup.otpauthURI} />
           <p>{setup.manualKey}</p>
-          <p>Setup expires {setup.expiresAt}</p>
+          <p>{t('security.setupExpires', { time: setup.expiresAt })}</p>
           <label>
-            Authenticator code
+            {t('security.authenticatorCode')}
             <input
               aria-describedby={error ? 'security-error' : undefined}
               aria-invalid={error ? true : undefined}
@@ -354,9 +356,9 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
               onChange={(event) => setCode(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={loading || !code.trim()}>Enable two-factor authentication</button>
+          <button type="submit" disabled={loading || !code.trim()}>{t('security.enable')}</button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
@@ -364,31 +366,31 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
       {step === 'recovery_codes' && (
         <div>
           <h2 ref={recoveryTitleRef} tabIndex={-1}>
-            Save your recovery codes
+            {t('security.saveRecovery')}
           </h2>
-          <p role="note">These recovery codes are shown only once. Store them safely before continuing.</p>
+          <p role="note">{t('security.recoveryNote')}</p>
           <ul>
             {recoveryCodes.map((recoveryCode, index) => (
               <li key={`${index}:${recoveryCode}`}>{recoveryCode}</li>
             ))}
           </ul>
           <button type="button" disabled={copying} onClick={() => void copyRecoveryCodes()}>
-            Copy recovery codes
+            {t('security.copyRecovery')}
           </button>
           <button type="button" disabled={copying} onClick={downloadRecoveryCodes}>
-            Download recovery codes
+            {t('security.downloadRecovery')}
           </button>
           <button type="button" disabled={copying} onClick={finishRecoveryCodes}>
-            Done
+            {t('common.done')}
           </button>
         </div>
       )}
 
       {step === 'regenerate' && (
         <form onSubmit={submitRegenerate}>
-          <h2>Regenerate recovery codes</h2>
+          <h2>{t('security.regenerate')}</h2>
           <label>
-            Current password
+            {t('security.currentPassword')}
             <input
               aria-describedby={error ? 'security-error' : undefined}
               aria-invalid={error ? true : undefined}
@@ -402,7 +404,7 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
             />
           </label>
           <label>
-            Authenticator code
+            {t('security.authenticatorCode')}
             <input
               aria-describedby={error ? 'security-error' : undefined}
               aria-invalid={error ? true : undefined}
@@ -415,20 +417,20 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
             />
           </label>
           <button type="submit" disabled={loading || !password.trim() || !code.trim()}>
-            Regenerate recovery codes
+            {t('security.regenerate')}
           </button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
 
       {step === 'disable' && (
         <form onSubmit={submitDisable}>
-          <h2>Disable two-factor authentication</h2>
-          <p>This removes all recovery codes.</p>
+          <h2>{t('security.disable')}</h2>
+          <p>{t('security.disableWarning')}</p>
           <label>
-            Current password
+            {t('security.currentPassword')}
             <input
               aria-describedby={error ? 'security-error' : undefined}
               aria-invalid={error ? true : undefined}
@@ -442,10 +444,10 @@ export function SecurityView({ onRecoveryDeliveryLockChange = () => {} }: { onRe
             />
           </label>
           <button className="dangerButton" type="submit" disabled={loading || !password.trim()}>
-            Confirm disable two-factor authentication
+            {t('security.confirmDisable')}
           </button>
           <button type="button" disabled={loading} onClick={cancelToOverview}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}

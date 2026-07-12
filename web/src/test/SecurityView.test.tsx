@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { SecurityView } from '../components/SecurityView';
+import { LanguageProvider } from '../i18n';
 
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
@@ -462,5 +463,20 @@ describe('SecurityView', () => {
     expect(recoveryTitle).toHaveFocus();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(title).toHaveFocus();
+  });
+
+  it('中文环境下概览界面显示中文文案', async () => {
+    window.localStorage.setItem('vibe.lang', 'zh');
+    mockedAPI.getTwoFactorStatus.mockResolvedValue({ enabled: false, recoveryCodesRemaining: 0 });
+    render(
+      <LanguageProvider>
+        <SecurityView />
+      </LanguageProvider>
+    );
+    expect(await screen.findByRole('heading', { name: '双因素安全' })).toBeInTheDocument();
+    expect(screen.getByText('双因素认证已停用。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启用双因素认证' })).toBeInTheDocument();
+    window.localStorage.clear();
+    document.documentElement.lang = 'en';
   });
 });

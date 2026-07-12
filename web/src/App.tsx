@@ -14,12 +14,15 @@ import { useT } from './i18n';
 type SessionsByDevice = Record<string, Session[]>;
 type ViewMode = 'terminals' | 'agentTokens' | 'settings' | 'devices';
 
+// Agent 令牌操作失败的类别;由展示层映射为本地化消息
+export type AgentTokenErrorKind = 'load' | 'create' | 'revoke' | 'delete';
+
 type AgentTokenState = {
   userId: string | null;
   tokens: AgentToken[];
   createdToken: CreatedAgentToken | null;
   loading: boolean;
-  error: string | null;
+  error: AgentTokenErrorKind | null;
 };
 
 function scopeAgentTokenState(value: AgentTokenState, userId: string | null): AgentTokenState {
@@ -63,7 +66,7 @@ export function useAgentTokenState(user: User | null) {
       }
     } catch {
       if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
-        setState((value) => ({ ...scopeAgentTokenState(value, request.userId), error: 'Failed to load agent tokens.' }));
+        setState((value) => ({ ...scopeAgentTokenState(value, request.userId), error: 'load' }));
       }
     } finally {
       if (mountedRef.current && request.generation === generationRef.current && request.userId === userIdRef.current) {
@@ -72,7 +75,7 @@ export function useAgentTokenState(user: User | null) {
     }
   }, [userId]);
 
-  async function mutate<T>(action: () => Promise<T>, failure: string, apply: (value: T, userId: string | null) => void) {
+  async function mutate<T>(action: () => Promise<T>, failure: AgentTokenErrorKind, apply: (value: T, userId: string | null) => void) {
     const request = begin();
     if (!request.userId) return;
     setState((value) => ({ ...scopeAgentTokenState(value, request.userId), loading: true, error: null }));
@@ -87,21 +90,21 @@ export function useAgentTokenState(user: User | null) {
     }
   }
   const create = (name: string, ttlHours: number) => mutate(
-    () => api.createAgentToken(name, ttlHours), 'Failed to create agent token.', (created, scopedUserId) =>
+    () => api.createAgentToken(name, ttlHours), 'create', (created, scopedUserId) =>
       setState((value) => {
         const scoped = scopeAgentTokenState(value, scopedUserId);
         return { ...scoped, createdToken: created, tokens: [created, ...scoped.tokens.filter((token) => token.id !== created.id)] };
       })
   );
   const revoke = (id: string) => mutate(
-    () => api.revokeAgentToken(id), 'Failed to revoke agent token.', (revoked, scopedUserId) =>
+    () => api.revokeAgentToken(id), 'revoke', (revoked, scopedUserId) =>
       setState((value) => {
         const scoped = scopeAgentTokenState(value, scopedUserId);
         return { ...scoped, tokens: scoped.tokens.map((token) => token.id === id ? revoked : token) };
       })
   );
   const remove = (id: string) => mutate(
-    () => api.deleteAgentToken(id), 'Failed to delete agent token.', (_, scopedUserId) =>
+    () => api.deleteAgentToken(id), 'delete', (_, scopedUserId) =>
       setState((value) => {
         const scoped = scopeAgentTokenState(value, scopedUserId);
         return { ...scoped, tokens: scoped.tokens.filter((token) => token.id !== id), createdToken: scoped.createdToken?.id === id ? null : scoped.createdToken };
@@ -243,7 +246,7 @@ type AppViewProps = {
   agentTokens: AgentToken[];
   createdAgentToken: CreatedAgentToken | null;
   tokenLoading: boolean;
-  tokenError: string | null;
+  tokenError: AgentTokenErrorKind | null;
   onCreateAgentToken: (name: string, ttlHours: number) => Promise<void>;
   onRevokeAgentToken: (id: string) => Promise<void>;
   onDeleteAgentToken?: (id: string) => Promise<void>;

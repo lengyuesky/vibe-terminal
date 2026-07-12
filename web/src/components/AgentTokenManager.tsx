@@ -1,8 +1,26 @@
 import { Check, Clipboard, KeyRound, RefreshCw, ShieldX, Trash2 } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import type { AgentToken, CreatedAgentToken } from '../api';
+import { useT } from '../i18n';
+import type { TranslationKey } from '../i18n';
+import type { AgentTokenErrorKind } from '../App';
 
 type TokenStatus = 'available' | 'used' | 'expired' | 'revoked';
+
+// 错误类别与令牌状态到翻译 key 的映射
+const tokenErrorKeys: Record<AgentTokenErrorKind, TranslationKey> = {
+  load: 'tokens.errLoad',
+  create: 'tokens.errCreate',
+  revoke: 'tokens.errRevoke',
+  delete: 'tokens.errDelete',
+};
+
+const tokenStatusKeys: Record<TokenStatus, TranslationKey> = {
+  available: 'tokens.statusAvailable',
+  used: 'tokens.statusUsed',
+  expired: 'tokens.statusExpired',
+  revoked: 'tokens.statusRevoked',
+};
 
 function getTokenStatus(token: AgentToken, now = new Date()): TokenStatus {
   if (token.revoked_at) return 'revoked';
@@ -31,13 +49,14 @@ export function AgentTokenManager({
 }: {
   tokens: AgentToken[];
   loading: boolean;
-  error: string | null;
+  error: AgentTokenErrorKind | null;
   createdToken: CreatedAgentToken | null;
   onCreate: (name: string, ttlHours: number) => Promise<void>;
   onRevoke: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
+  const { t } = useT();
   const [name, setName] = useState('agent');
   const [ttlHours, setTtlHours] = useState('24');
   const [submitting, setSubmitting] = useState(false);
@@ -117,25 +136,25 @@ export function AgentTokenManager({
     <main className="tokenPage">
       <header className="tokenHeader">
         <div>
-          <h1>Agent Tokens</h1>
+          <h1>{t('tokens.title')}</h1>
         </div>
         <button type="button" className="secondaryButton" onClick={onRefresh} disabled={loading}>
           <RefreshCw size={16} aria-hidden="true" />
-          Refresh
+          {t('common.refresh')}
         </button>
       </header>
 
       <section className="tokenPanel createTokenPanel" aria-labelledby="create-token-title">
         <div className="panelTitleRow">
-          <h2 id="create-token-title">Create token</h2>
+          <h2 id="create-token-title">{t('tokens.create')}</h2>
         </div>
         <form className="tokenForm" onSubmit={handleCreate}>
           <label>
-            <span>Token name</span>
+            <span>{t('tokens.name')}</span>
             <input value={name} placeholder="office-mac" onChange={(event) => setName(event.target.value)} />
           </label>
           <label>
-            <span>TTL hours</span>
+            <span>{t('tokens.ttl')}</span>
             <input
               type="number"
               min={1}
@@ -146,48 +165,48 @@ export function AgentTokenManager({
           </label>
           <button type="submit" className="primaryButton tokenSubmitButton" disabled={submitting}>
             <KeyRound size={16} aria-hidden="true" />
-            Create
+            {t('tokens.createButton')}
           </button>
         </form>
         {createdToken && (
           <div className="newToken" role="status">
             <div className="newTokenSummary">
-              <span>Token name</span>
+              <span>{t('tokens.name')}</span>
               <strong>{createdToken.name}</strong>
             </div>
             <div className="newTokenGrid">
               <div className="newTokenBlock">
                 <div className="newTokenBlockHeader">
-                  <span>Token</span>
+                  <span>{t('tokens.token')}</span>
                   <button type="button" className="iconTextButton" onClick={copyToken}>
                     {copyTokenState === 'copied' ? (
                       <Check size={16} aria-hidden="true" />
                     ) : (
                       <Clipboard size={16} aria-hidden="true" />
                     )}
-                    {copyTokenState === 'copied' ? 'Copied' : 'Copy'}
+                    {copyTokenState === 'copied' ? t('common.copied') : t('common.copy')}
                   </button>
                 </div>
                 <code className="tokenValue">{createdToken.token}</code>
-                {copyTokenState === 'failed' && <span className="error">Copy failed</span>}
+                {copyTokenState === 'failed' && <span className="error">{t('common.copyFailed')}</span>}
               </div>
               <div className="newTokenBlock">
                 <div className="newTokenBlockHeader">
-                  <span>Agent command</span>
+                  <span>{t('tokens.agentCommand')}</span>
                   <button type="button" className="iconTextButton" onClick={copyAgentCommand}>
                     {copyCommandState === 'copied' ? (
                       <Check size={16} aria-hidden="true" />
                     ) : (
                       <Clipboard size={16} aria-hidden="true" />
                     )}
-                    {copyCommandState === 'copied' ? 'Copied' : 'Copy'}
+                    {copyCommandState === 'copied' ? t('common.copied') : t('common.copy')}
                   </button>
                 </div>
                 <pre className="agentCommand">
                   <code>{registerCommand}</code>
                   <code>{runCommand}</code>
                 </pre>
-                {copyCommandState === 'failed' && <span className="error">Copy failed</span>}
+                {copyCommandState === 'failed' && <span className="error">{t('common.copyFailed')}</span>}
               </div>
             </div>
           </div>
@@ -196,24 +215,24 @@ export function AgentTokenManager({
 
       <section className="tokenPanel" aria-labelledby="token-list-title">
         <div className="panelTitleRow">
-          <h2 id="token-list-title">Tokens</h2>
-          {loading && <span className="muted">Loading...</span>}
+          <h2 id="token-list-title">{t('tokens.list')}</h2>
+          {loading && <span className="muted">{t('common.loading')}</span>}
         </div>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error">{t(tokenErrorKeys[error])}</p>}
         {!loading && sortedTokens.length === 0 ? (
-          <p className="emptyState">No agent tokens yet.</p>
+          <p className="emptyState">{t('tokens.empty')}</p>
         ) : (
           <div className="tokenTableWrap">
             <table className="tokenTable">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                  <th>Expires</th>
-                  <th>Used</th>
-                  <th>Revoked</th>
-                  <th>Action</th>
+                  <th>{t('tokens.colName')}</th>
+                  <th>{t('tokens.colStatus')}</th>
+                  <th>{t('tokens.colCreated')}</th>
+                  <th>{t('tokens.colExpires')}</th>
+                  <th>{t('tokens.colUsed')}</th>
+                  <th>{t('tokens.colRevoked')}</th>
+                  <th>{t('tokens.colAction')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -228,7 +247,7 @@ export function AgentTokenManager({
                         <span className="tokenId">{token.id.slice(0, 8)}</span>
                       </td>
                       <td>
-                        <span className={`tokenStatus tokenStatus-${status}`}>{status}</span>
+                        <span className={`tokenStatus tokenStatus-${status}`}>{t(tokenStatusKeys[status])}</span>
                       </td>
                       <td>{formatDate(token.created_at)}</td>
                       <td>{formatDate(token.expires_at)}</td>
@@ -238,22 +257,22 @@ export function AgentTokenManager({
                         {status === 'revoked' && confirmingDelete ? (
                           <button type="button" className="dangerButton" onClick={() => handleDelete(token.id)}>
                             <Trash2 size={16} aria-hidden="true" />
-                            Confirm delete
+                            {t('tokens.confirmDelete')}
                           </button>
                         ) : status === 'revoked' ? (
                           <button type="button" className="iconTextButton" onClick={() => setPendingDeleteId(token.id)}>
                             <Trash2 size={16} aria-hidden="true" />
-                            Delete
+                            {t('common.delete')}
                           </button>
                         ) : confirming ? (
                           <button type="button" className="dangerButton" onClick={() => handleRevoke(token.id)}>
                             <ShieldX size={16} aria-hidden="true" />
-                            Confirm
+                            {t('common.confirm')}
                           </button>
                         ) : (
                           <button type="button" className="iconTextButton" onClick={() => setPendingRevokeId(token.id)}>
                             <Trash2 size={16} aria-hidden="true" />
-                            Revoke
+                            {t('tokens.revoke')}
                           </button>
                         )}
                       </td>

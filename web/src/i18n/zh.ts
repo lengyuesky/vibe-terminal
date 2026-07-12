@@ -61,7 +61,7 @@ export const zh: Translation = {
   'security.qrLabel': '双因素设置二维码',
   'security.setupExpires': '设置有效期至 {time}',
   'security.saveRecovery': '保存你的恢复码',
-  'security.recoveryNote': '恢复码仅显示一次,请先妥善保存再继续。',
+  'security.recoveryNote': '恢复码仅显示一次，请先妥善保存再继续。',
   'security.copyRecovery': '复制恢复码',
   'security.downloadRecovery': '下载恢复码',
   'security.disableWarning': '这将删除所有恢复码。',
@@ -137,7 +137,7 @@ export const zh: Translation = {
   'snippets.commandLabel': '快捷命令内容',
   'snippets.errSave': '保存快捷命令失败。',
   'snippets.errDelete': '删除快捷命令失败。',
-  'snippets.hint': '点击快捷命令可将其输入到当前终端,然后自行按回车执行。',
+  'snippets.hint': '点击快捷命令可将其输入到当前终端，然后自行按回车执行。',
 
   'search.placeholder': '搜索',
   'search.terminal': '搜索终端',
@@ -163,5 +163,5 @@ export const zh: Translation = {
   'files.empty': '空目录',
   'files.errList': '列出目录失败',
   'files.errUpload': '上传失败',
-  'files.overwrite': '{name} 已存在,是否覆盖?',
+  'files.overwrite': '{name} 已存在，是否覆盖？',
 };

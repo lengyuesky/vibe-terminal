@@ -17,9 +17,10 @@ function formatSize(size: number): string {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
-function formatTime(unixSeconds: number): string {
+// 按应用语言(而非浏览器语言)格式化文件修改时间
+function formatTime(unixSeconds: number, locale: string): string {
   if (!unixSeconds) return '';
-  return new Date(unixSeconds * 1000).toLocaleString();
+  return new Date(unixSeconds * 1000).toLocaleString(locale);
 }
 
 function joinPath(dir: string, name: string): string {
@@ -43,7 +44,9 @@ function breadcrumbSegments(path: string): Array<{ label: string; target: string
 }
 
 export function FileManagerPanel({ device, onClose }: { device: Device; onClose: () => void }) {
-  const { t } = useT();
+  const { t, lang } = useT();
+  // 日期时间跟随应用语言,而非浏览器 locale
+  const dateLocale = lang === 'zh' ? 'zh-CN' : 'en';
   const [path, setPath] = useState('~');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,7 +69,8 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
       }
     },
     // 故意不把 t 加入依赖:否则切换语言会重建 load 并触发 useEffect,把目录重置回 ~。
-    // 代价仅是切换语言前已产生的错误消息保持旧语言,可接受。
+    // 代价:load 闭包捕获的是挂载时的 t,同一设备下切换语言后,列目录失败里非 Error 抛出
+    // 的兜底文案仍按旧语言渲染,切换前已产生的错误消息同样保持旧语言,属计划内的可接受取舍。
     [device.id]
   );
 
@@ -204,7 +208,7 @@ export function FileManagerPanel({ device, onClose }: { device: Device; onClose:
                 </span>
               )}
               <span className="fileSize">{entry.is_dir ? '' : formatSize(entry.size)}</span>
-              <span className="fileTime">{formatTime(entry.modified_at)}</span>
+              <span className="fileTime">{formatTime(entry.modified_at, dateLocale)}</span>
               <span className="fileActions">
                 {!entry.is_dir && (
                   <button

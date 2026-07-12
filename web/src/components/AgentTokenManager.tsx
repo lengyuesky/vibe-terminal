@@ -29,9 +29,10 @@ function getTokenStatus(token: AgentToken, now = new Date()): TokenStatus {
   return 'available';
 }
 
-function formatDate(value?: string) {
+// 按应用语言(而非浏览器语言)格式化日期时间
+function formatDate(value: string | undefined, locale: string) {
   if (!value) return '-';
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value));
@@ -56,7 +57,9 @@ export function AgentTokenManager({
   onDelete: (id: string) => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
-  const { t } = useT();
+  const { t, lang } = useT();
+  // 日期时间跟随应用语言,而非浏览器 locale
+  const dateLocale = lang === 'zh' ? 'zh-CN' : 'en';
   const [name, setName] = useState('agent');
   const [ttlHours, setTtlHours] = useState('24');
   const [submitting, setSubmitting] = useState(false);
@@ -249,10 +252,10 @@ export function AgentTokenManager({
                       <td>
                         <span className={`tokenStatus tokenStatus-${status}`}>{t(tokenStatusKeys[status])}</span>
                       </td>
-                      <td>{formatDate(token.created_at)}</td>
-                      <td>{formatDate(token.expires_at)}</td>
-                      <td>{formatDate(token.used_at)}</td>
-                      <td>{formatDate(token.revoked_at)}</td>
+                      <td>{formatDate(token.created_at, dateLocale)}</td>
+                      <td>{formatDate(token.expires_at, dateLocale)}</td>
+                      <td>{formatDate(token.used_at, dateLocale)}</td>
+                      <td>{formatDate(token.revoked_at, dateLocale)}</td>
                       <td>
                         {status === 'revoked' && confirmingDelete ? (
                           <button type="button" className="dangerButton" onClick={() => handleDelete(token.id)}>
